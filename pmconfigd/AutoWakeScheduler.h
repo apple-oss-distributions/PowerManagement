@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -23,23 +23,26 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 /*
- * Copyright (c) 2002 Apple Computer, Inc.  All rights reserved. 
+ * Copyright (c) 2003 Apple Computer, Inc.  All rights reserved. 
  *
  * HISTORY
  *
- * 29-Aug-02 ebold created
+ * 30-Jan-03 ebold created
  *
  */
  
-#ifndef _PMSettings_h_
-#define _PMSettings_h_
+#ifndef _AutoWakeScheduler_h_
+#define _AutoWakeScheduler_h_
+
+#include <IOKit/pwr_mgt/IOPMLib.h>
+#include <IOKit/pwr_mgt/IOPMLibPrivate.h>
+
+__private_extern__ void AutoWake_prime(void);
  
-__private_extern__ void PMSettings_prime(void);
- 
-__private_extern__ void PMSettingsSleepWakeNotification(natural_t);
+__private_extern__ void AutoWakeSleepWakeNotification(natural_t);
 
-__private_extern__ void PMSettingsPrefsHaveChanged(void);
+__private_extern__ void AutoWakePrefsHaveChanged(void);
 
-__private_extern__ void PMSettingsBatteriesHaveChanged(CFArrayRef);
+__private_extern__ void AutoWakePMUInterestNotification(natural_t messageType, UInt32 messageArgument);
 
-#endif _PMSettings_h_
+#endif // _AutoWakeScheduler_h_

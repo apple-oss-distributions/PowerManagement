@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -22,24 +22,21 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
-/*
- * Copyright (c) 2002 Apple Computer, Inc.  All rights reserved. 
- *
- * HISTORY
- *
- * 29-Aug-02 ebold created
- *
- */
- 
-#ifndef _PMSettings_h_
-#define _PMSettings_h_
- 
-__private_extern__ void PMSettings_prime(void);
- 
-__private_extern__ void PMSettingsSleepWakeNotification(natural_t);
+#ifndef _RepeatingAutoWake_h_
+#define _RepeatingAutoWake_h_
 
-__private_extern__ void PMSettingsPrefsHaveChanged(void);
+#include <IOKit/pwr_mgt/IOPMLib.h>
+#include <IOKit/pwr_mgt/IOPMLibPrivate.h>
 
-__private_extern__ void PMSettingsBatteriesHaveChanged(CFArrayRef);
+/* For distribution of notifications from pmconfigd.c */
+__private_extern__ void RepeatingAutoWake_prime(void);
 
-#endif _PMSettings_h_
+__private_extern__ void RepeatingAutoWakePrefsHaveChanged(void);
+
+__private_extern__ void RepeatingAutoWakeSleepWakeNotification(natural_t);
+
+/* For shutdown/sleep handling from AutoWakeScheduler.c */
+__private_extern__ void RepeatingAutoWakeTimeForPowerOff(void);
+__private_extern__ void RepeatingAutoWakeTimeForPowerOn(void);
+
+#endif // _RepeatingAutoWake_h_
