@@ -24,17 +24,18 @@
  *
  * HISTORY
  *
- * 22-Mar-02 ebold created
- * Taken entirely from ryanc and epeyton's work in Battery Monitor MenuExtra
+ * 29-Aug-02 ebold created
  *
  */
-#include <syslog.h>
 #include <CoreFoundation/CoreFoundation.h>
-#include <CoreFoundation/CFDictionary.h>
-#include <IOKit/ps/IOPSKeys.h>
+#include <SystemConfiguration/SystemConfiguration.h>
+#include <SystemConfiguration/SCValidation.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
+#include <IOKit/pwr_mgt/IOPM.h>
+#include <IOKit/ps/IOPSKeys.h>
 #include <IOKit/IOMessage.h>
-#include "battery.h"
+
+#include "BatteryTimeRemaining.h"
 
 /**** PMUBattery configd plugin
   The functions in battery.c calculate the "meta-data" from the raw data available from the hardware. 
@@ -55,6 +56,8 @@
    "interested client" of the PowerSource API receives a notification.
 ****/
 
+#define MAX_BATTERY_NUM		2
+#define kBATTERY_HISTORY	30
 
 // static global variables for tracking battery state
     static int		_batLevel[MAX_BATTERY_NUM];
@@ -73,20 +76,40 @@
     static int		_pluggedIn, _lastpluggedIn;
     static int		_charging;
     static int		_impendingSleep = 0;
-    static io_connect_t     _pm_ack_port = 0;
 
 
-void _pmcfgd_callback(void * port,io_service_t y,natural_t messageType,void * messageArgument)
-{    
+static CFStringRef PMUBatteryDynamicStore[MAX_BATTERY_NUM];
+
+// These are defined below
+static void	    calculateTimeRemaining(void);
+static bool     _IOPMCalculateBatteryInfo(CFArrayRef, CFDictionaryRef *);
+static void     _IOPMCalculateBatterySetup(void);
+
+
+__private_extern__ void
+BatteryTimeRemaining_prime(void)
+{
+    // setup battery calculation global variables
+    _IOPMCalculateBatterySetup();
+    
+    // Initialize SCDynamicStore battery key names
+    PMUBatteryDynamicStore[0] = SCDynamicStoreKeyCreate(kCFAllocatorDefault, CFSTR("%@%@/%@"),
+            kSCDynamicStoreDomainState, CFSTR(kIOPSDynamicStorePath), CFSTR("InternalBattery-0"));
+    PMUBatteryDynamicStore[1] = SCDynamicStoreKeyCreate(kCFAllocatorDefault, CFSTR("%@%@/%@"),
+            kSCDynamicStoreDomainState, CFSTR(kIOPSDynamicStorePath), CFSTR("InternalBattery-1"));
+
+    return;
+}
+ 
+__private_extern__ void
+BatteryTimeRemainingSleepWakeNotification(natural_t messageType)
+{
     switch ( messageType ) {
     case kIOMessageSystemWillSleep:
         // System is going to sleep - reset time remaining calculations.
         // Battery drain during sleep will produce an unrealistic time remaining
         // expectation on wake from sleep unless we reset the average sample.
         _impendingSleep = 1;
-        // fall through
-    case kIOMessageCanSystemSleep:
-        IOAllowPowerChange(_pm_ack_port, (long)messageArgument);
         break;
         
     case kIOMessageSystemHasPoweredOn:
@@ -95,17 +118,47 @@ void _pmcfgd_callback(void * port,io_service_t y,natural_t messageType,void * me
     }
 }
 
-static void	calculateTimeRemaining(void);
+__private_extern__ void
+BatteryTimeRemainingBatteryPollingTimer(CFArrayRef battery_info)
+{
+    CFDictionaryRef	result[MAX_BATTERY_NUM];
+    int			i;
+    static SCDynamicStoreRef	store = NULL;
+    static CFDictionaryRef	old_battery[MAX_BATTERY_NUM] = {NULL, NULL};
+    
+    if(!battery_info) return;
+    
+    if(!store) 
+        store = SCDynamicStoreCreate(kCFAllocatorDefault, CFSTR("PMUBattery configd plugin"), NULL, NULL);
 
-void 	_IOPMCalculateBatterySetup(void)
+    bzero(result, MAX_BATTERY_NUM*sizeof(CFDictionaryRef));
+    _IOPMCalculateBatteryInfo(battery_info, result);
+    
+    // Publish the results of calculation in the SCDynamicStore
+    for(i=0; i<MAX_BATTERY_NUM; i++) {
+        if(result[i]) {   
+            // Determine if CFDictionary is new or has changed...
+            // Only do SCDynamicStoreSetValue if the dictionary is different
+            if(!old_battery[i]) {
+                SCDynamicStoreSetValue(store, PMUBatteryDynamicStore[i], result[i]);
+            } else {
+                if(!CFEqual(old_battery[i], result[i])) {
+                    SCDynamicStoreSetValue(store, PMUBatteryDynamicStore[i], result[i]);
+                }
+                CFRelease(old_battery[i]);
+            }
+            old_battery[i] = result[i];
+        }
+    }
+    
+}
+
+static void 	_IOPMCalculateBatterySetup(void)
 {
     io_connect_t		pm_tmp;
-    io_connect_t		root_port;
     int 			kr;
     CFArrayRef		    	info;
     int				count,i;
-    IONotificationPortRef       notify;
-    io_object_t                 anIterator;
     
     // Initialize battery history to 3?
     for(count = 0;count < kBATTERY_HISTORY;count++){
@@ -116,13 +169,7 @@ void 	_IOPMCalculateBatterySetup(void)
     _batName[0] = CFSTR("InternalBattery-0");
     _batName[1] = CFSTR("InternalBattery-1");
     
-    // Register for SystemPower notifications. We re-calculate time remaining when we detect a system sleep.
-    _pm_ack_port = IORegisterForSystemPower (0, &notify, _pmcfgd_callback, &anIterator);
-    if ( _pm_ack_port != NULL ) {
-        if(notify) CFRunLoopAddSource(CFRunLoopGetCurrent(),
-                            IONotificationPortGetRunLoopSource(notify),
-                            kCFRunLoopDefaultMode);
-    }
+
     
     kr = IOMasterPort(bootstrap_port,&_batteryPort);
     if(kr == kIOReturnSuccess){
@@ -158,6 +205,18 @@ void 	_IOPMCalculateBatterySetup(void)
 }
 
 
+// Local helper functions
+static int isBatteryPresent(int i)
+{
+    return ((_flags[i] & kIOBatteryInstalled) ? 1:0);
+}
+
+static int isACAdapterConnected(int i)
+{
+    return (_pluggedIn);
+}
+
+
 /**** _IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
  Calculates remaining battery time and stuffs lots of battery status into a CFDictionary.
  Arguments: 
@@ -170,7 +229,8 @@ void 	_IOPMCalculateBatterySetup(void)
     The contents of each CFDictionaryRef are defined in IOKit.framework/ps/IOPSKeys.h
  Return: TRUE if no errors were encountered, FALSE otherwise.
 ****/
-bool 	_IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
+static bool 	
+_IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
 {
     CFNumberRef			n, n0, nneg1;
     CFMutableDictionaryRef 	mutDict = NULL;
@@ -180,6 +240,7 @@ bool 	_IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
     int				ehours = 0;
     int				eminutes = 0;
     int				stillCalc = 0;
+    float			percentRemaining = 0;
         
     if(info) count = CFArrayGetCount(info);
     else return NULL;
@@ -234,6 +295,7 @@ bool 	_IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
     if(_impendingSleep) {
         _historyCount = 0;
         _historyLimit = 0;
+        _state = -1;
     }
 
     // Determine if we have a good time remaining calculation yet. If so, set stillCalc = 0
@@ -278,7 +340,7 @@ bool 	_IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
             
             // Set isPresent flag
             CFDictionarySetValue(mutDict, CFSTR(kIOPSIsPresentKey), 
-                        (_flags[i] & kIOBatteryInstalled) ? kCFBooleanTrue:kCFBooleanFalse);
+                        (isBatteryPresent(i)) ? kCFBooleanTrue:kCFBooleanFalse);
             
             // Set isCharging and time remaining
             minutes = (int)(60.0*_hoursRemaining[i]);
@@ -286,38 +348,49 @@ bool 	_IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
             n0 = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &temp);
             temp = -1;
             nneg1 = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &temp);
-            if(!(_flags[i] & kIOBatteryInstalled)) {
+            if( !isBatteryPresent(i) ) {
                 // remaining time calculations only have meaning if the battery is present
                 CFDictionarySetValue(mutDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
                 CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToFullChargeKey), n0);
                 CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), n0);
-            } else if(stillCalc) {
-                // If we are still calculating then our time remaining
-                // numbers aren't valid yet. Stuff with -1.
-                CFDictionarySetValue(mutDict, CFSTR(kIOPSIsChargingKey), 
-                        _charging ? kCFBooleanTrue : kCFBooleanFalse);
-                CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToFullChargeKey), nneg1);
-                CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), nneg1);
-            } else {   
-                // else there IS a battery installed, and remaining time calculation makes sense
-                if(_charging) {
-                    // Set isCharging to True
-                    CFDictionarySetValue(mutDict, CFSTR(kIOPSIsChargingKey), kCFBooleanTrue);
-                    n = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &minutes);
-                    if(n) {
-                        CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToFullChargeKey), n);
-                        CFRelease(n);
-                    }
-                    CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), n0);
-                } else {
-                    // Set isCharging to False
+            } else {
+                // A battery is installed
+                // Fully charged?
+                percentRemaining = (float)( ((float)_charge[i])/((float)_capacity[i]));
+                if(percentRemaining > 0.95 && isACAdapterConnected(i))
+                {
+                    // Fully charged!
                     CFDictionarySetValue(mutDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
-                    n = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &minutes);
-                    if(n) {
-                        CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), n);
-                        CFRelease(n);
-                    }
+                    CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), n0);
                     CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToFullChargeKey), n0);
+                } else if(stillCalc) {
+                    // If we are still calculating then our time remaining
+                    // numbers aren't valid yet. Stuff with -1.
+                    CFDictionarySetValue(mutDict, CFSTR(kIOPSIsChargingKey), 
+                            _charging ? kCFBooleanTrue : kCFBooleanFalse);
+                    CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToFullChargeKey), nneg1);
+                    CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), nneg1);
+                } else {   
+                    // else there IS a battery installed, and remaining time calculation makes sense
+                    if(_charging) {
+                        // Set isCharging to True
+                        CFDictionarySetValue(mutDict, CFSTR(kIOPSIsChargingKey), kCFBooleanTrue);
+                        n = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &minutes);
+                        if(n) {
+                            CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToFullChargeKey), n);
+                            CFRelease(n);
+                        }
+                        CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), n0);
+                    } else {
+                        // Set isCharging to False
+                        CFDictionarySetValue(mutDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
+                        n = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &minutes);
+                        if(n) {
+                            CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToEmptyKey), n);
+                            CFRelease(n);
+                        }
+                        CFDictionarySetValue(mutDict, CFSTR(kIOPSTimeToFullChargeKey), n0);
+                    }
                 }
             }
             CFRelease(n0);
@@ -331,11 +404,8 @@ bool 	_IOPMCalculateBatteryInfo(CFArrayRef info, CFDictionaryRef *ret)
     return TRUE;
 }
 
-
-
-
-
-void	calculateTimeRemaining(void)
+static void	
+calculateTimeRemaining(void)
 {
     int		cnt;
     float		deltaAvg[2];
@@ -381,34 +451,6 @@ void	calculateTimeRemaining(void)
         deltaAvg[1]     = deltaAvg[1]/(_historyCount+1);
     }
 
-    /*
-    #warning DEBUG STUFF!!
-    {
-        //Reset the delta values
-        deltaAvg[0] = deltaAvg[1] = 0;
-
-        if (_historyLimit) {
-            for(cnt = 0;cnt < kBATTERY_HISTORY;cnt++) {
-                deltaAvg[0] += _batteryHistory[0][cnt];
-                deltaAvg[1] += _batteryHistory[1][cnt];
-                printf("bh[%d] = %f\n",cnt,_batteryHistory[0][cnt]);
-            }
-        
-            deltaAvg[0]     = deltaAvg[0]/kBATTERY_HISTORY;
-            deltaAvg[1]     = deltaAvg[1]/kBATTERY_HISTORY;
-        } else {
-            for(cnt = 0;cnt <= _historyCount;cnt++) {
-                deltaAvg[0] += _batteryHistory[0][cnt];
-                deltaAvg[1] += _batteryHistory[1][cnt];
-                printf("bh[%d] = %f\n",cnt,_batteryHistory[0][cnt]);
-            }
-            
-            deltaAvg[0]     = deltaAvg[0]/(_historyCount+1);
-            deltaAvg[1]     = deltaAvg[1]/(_historyCount+1);
-        }
-        printf("Average = %f\n",deltaAvg[0]);
-    }*/
-  
     //Reset the history counter (loop around in the buffer)
     if (_historyCount >= kBATTERY_HISTORY-1) {
         _historyCount = 0;
@@ -442,7 +484,7 @@ void	calculateTimeRemaining(void)
         //_hoursRemaining[0] = -1*((((double)toCharge[0]+(double)toCharge[1]))/((double)deltaAvg[0]+(double)deltaAvg[1]))/360;
         _hoursRemaining[0] = -1*(((double)toCharge[0])/((double)deltaAvg[0]+(double)deltaAvg[1]))/360;
         _hoursRemaining[1] = -1*(((double)toCharge[1])/((double)deltaAvg[0]+(double)deltaAvg[1]))/360;        
-    } else if (!(_flags[0] & kIOBatteryInstalled) && !(_flags[1] & kIOBatteryInstalled)) {
+    } else if (!isBatteryPresent(0) && !isBatteryPresent(1)) {
         //When there are no batteries installed
         //if there were batteries installed before hand, then reset the history (so we get
         //a fresh buffer when a battery is installed)

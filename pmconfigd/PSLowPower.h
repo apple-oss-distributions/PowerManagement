@@ -24,17 +24,14 @@
  *
  * HISTORY
  *
- * 8-May-02 ebold created
- * configd plugin for tracking battery usage
+ * 29-Aug-02 ebold created
  *
  */
+#ifndef _PSLowPower_h_
+#define _PSLowPower_h_
  
-void
-PMUBatteryPollingTimer(CFArrayRef batteryInfo);
+__private_extern__ void PSLowPower_prime(void);
 
-void
-PMUBattery_prime();
+__private_extern__ void PSLowPowerPSChange(CFTypeRef);
 
-void
-PMUBattery_load(CFBundleRef bundle, Boolean bundleVerbose);
-
+#endif _PSLowPower_h_
