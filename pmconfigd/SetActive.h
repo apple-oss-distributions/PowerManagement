@@ -27,34 +27,15 @@
  * 29-Aug-02 ebold created
  *
  */
+#ifndef _PMSetActive_h_
+#define _PMSetActive_h_
  
-#ifndef _PMSettings_h_
-#define _PMSettings_h_
+__private_extern__ void PMAssertions_prime(void);
 
-/* Power Management profile bits */
-enum {
-    kPMForceLowSpeedProfile         = (1<<0),
-    kPMForceHighSpeed               = (1<<1)
-};
+/*! @function _IOPMSetActivePowerProfilesRequiresRoot
+    @abstract Do not use. Internal power management helper only.
+*/
+__private_extern__ IOReturn 
+_IOPMSetActivePowerProfilesRequiresRoot(CFDictionaryRef which_profile, int uid, int gid);
 
-__private_extern__ void PMSettings_prime(void);
- 
-__private_extern__ void PMSettingsSleepWakeNotification(natural_t);
-
-__private_extern__ void PMSettingsPrefsHaveChanged(void);
-
-__private_extern__ void PMSettingsBatteriesHaveChanged(CFArrayRef);
-
-__private_extern__ void PMSettingsPSChange(CFTypeRef);
-
-__private_extern__ void PMSettingsConsoleUserHasChanged(void);
-
-// For UPS shutdown/restart code in PSLowPower.c
-__private_extern__ CFDictionaryRef  PMSettings_CopyActivePMSettings(void);
-
-// For IOPMAssertions code in SetActive.c
-__private_extern__ void overrideSetting(int, int);
-__private_extern__ void activateSettingOverrides(void);
-
-
-#endif _PMSettings_h_
+#endif _PSLowPower_h_

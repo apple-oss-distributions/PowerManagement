@@ -27,13 +27,17 @@ __private_extern__ void _askNicelyThenShutdownSystem(void);
 
 __private_extern__ void _askNicelyThenSleepSystem(void);
 
-__private_extern__ void _doNiceShutdown(void);
+//__private_extern__ void _doNiceShutdown(void);
 
 __private_extern__ CFArrayRef _copyBatteryInfo(void);
 
 __private_extern__ CFUserNotificationRef _showUPSWarning(void);
 
-__private_extern__ CFUserNotificationRef _showLowBatteryWarning(void);
+//__private_extern__ CFUserNotificationRef _showLowBatteryWarning(void);
+
+__private_extern__ IOReturn _setRootDomainProperty(
+                                    CFStringRef     key,
+                                    CFTypeRef       val);
 
 #endif
 

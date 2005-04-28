@@ -37,6 +37,15 @@ enum
 #define kPowerManagerActionKey "action"
 #define kPowerManagerValueKey "value"
 
+/******
+ * Do not remove DUMMY macros
+ *
+ * The following DUMMY_* macros aren't used in the source code, but they're
+ * here as a dummy code for our localization pre-processor scripts to see the strings
+ * we're using in CFCopyLocalizedStringWithDefaultValue. Several localization
+ * tools analyze the arguments to these calls to auto-generate loc files.
+ ******/
+
 #define DUMMY_UPS_HEADER(myBundle) CFCopyLocalizedStringWithDefaultValue( \
             CFSTR("WARNING!"), \
             CFSTR("Localizable"), \
@@ -64,6 +73,31 @@ enum
             myBundle, \
             CFSTR("Please connect your computer to AC power. If you do not, your computer will go to sleep in a few minutes to preserve the contents of memory."), \
             NULL);
+
+__private_extern__ IOReturn 
+_setRootDomainProperty(
+    CFStringRef                 key, 
+    CFTypeRef                   val) 
+{
+    mach_port_t                 masterPort;
+    io_iterator_t               it;
+    io_registry_entry_t         root_domain;
+    IOReturn                    ret;
+
+    IOMasterPort(bootstrap_port, &masterPort);
+    if(!masterPort) return kIOReturnError;
+    IOServiceGetMatchingServices(masterPort, IOServiceNameMatching("IOPMrootDomain"), &it);
+    if(!it) return kIOReturnError;
+    root_domain = (io_registry_entry_t)IOIteratorNext(it);
+    if(!root_domain) return kIOReturnError;
+ 
+    ret = IORegistryEntrySetCFProperty(root_domain, key, val);
+
+    IOObjectRelease(root_domain);
+    IOObjectRelease(it);
+    IOObjectRelease(masterPort);
+    return ret;
+}
 
 
 static void sendNotification(int command)
@@ -101,10 +135,11 @@ __private_extern__ void _askNicelyThenSleepSystem(void)
     sendNotification(PowerMangerScheduledSleep);
 }
 
+/*
 __private_extern__ void _doNiceShutdown(void)
 {
 }
-
+*/
 
 __private_extern__ CFArrayRef _copyBatteryInfo(void) 
 {
@@ -164,10 +199,10 @@ __private_extern__ CFUserNotificationRef _showUPSWarning(void)
     return note_ref;
 #endif // STANDALONE    
 }
-
+/*
 __private_extern__ CFUserNotificationRef _showLowBatteryWarning(void)
 {
-/*
+
 // _showLowBatteryWarning is a no-op until
 // we resolve the TalkingAlerts issue. Need this to generate a speakable alert,
 // but the plumbing involved in doing that from configd is complicated.
@@ -216,6 +251,6 @@ __private_extern__ CFUserNotificationRef _showLowBatteryWarning(void)
     }
 
     return note_ref;
-*/
-}
 
+}
+*/
