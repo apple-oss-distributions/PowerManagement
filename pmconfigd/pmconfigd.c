@@ -74,18 +74,17 @@
 #endif
 
 // Global keys
+static CFStringRef              gTZNotificationNameString   = NULL;
 static CFStringRef              EnergyPrefsKey              = NULL;
 static CFStringRef              AutoWakePrefsKey            = NULL;
-static CFStringRef              ConsoleUserKey              = NULL;
 
-static io_service_t             gIOResourceService          = 0;
 static io_connect_t             _pm_ack_port                = 0;
 static io_iterator_t            _ups_added_noteref          = 0;
 static int                      _alreadyRunningIOUPSD       = 0;
 static int                      gClientUID                  = -1;
 static int                      gClientGID                  = -1;
 
-CFMachPortRef            serverMachPort              = NULL;
+CFMachPortRef                   serverMachPort              = NULL;
 
 
 // defined by MiG
@@ -95,16 +94,125 @@ extern boolean_t powermanagement_server(mach_msg_header_t *, mach_msg_header_t *
 __private_extern__ void cleanupAssertions(mach_port_t dead_port);
 
 // foward declarations
-static void tellSMU_GMTOffset(void);
+static void initializeESPrefsDynamicStore(void);
+static void initializePowerSourceChangeNotification(void);
+static void initializeMIGServer(void);
+static void initializeInterestNotifications(void);
+static void initializeTimezoneChangeNotifications(void);
+static void intializeDisplaySleepNotifications(void);
+
+static void SleepWakeCallback(void *,io_service_t, natural_t, void *);
+static void ESPrefsHaveChanged(SCDynamicStoreRef, CFArrayRef, void *);
+static void _ioupsd_exited(pid_t, int, struct rusage *, void *);
+static void UPSDeviceAdded(void *, io_iterator_t);
+static void BatteryMatch(void *, io_iterator_t);
+static void BatteryInterest(void *, io_service_t, natural_t, void *);
+static void PMUInterest(void *, io_service_t, natural_t, void *);
+extern void PowerSourcesHaveChanged(void *info);
+static void broadcastGMTOffset(void);
+
+static void timeZoneChangedCallBack(
+                CFNotificationCenterRef center, 
+                void *observer, 
+                CFStringRef notificationName, 
+                const void *object, 
+                CFDictionaryRef userInfo);
+
+static void displayPowerStateChange(
+                void *ref, 
+                io_service_t service, 
+                natural_t messageType, 
+                void *arg);
+
+static boolean_t pm_mig_demux(
+                mach_msg_header_t * request,
+                mach_msg_header_t * reply);
+
+static void mig_server_callback(
+                CFMachPortRef port, 
+                void *msg, 
+                CFIndex size, 
+                void *info);
+
+kern_return_t _io_pm_set_active_profile(
+                mach_port_t         server,
+                vm_offset_t         profiles_ptr,
+                mach_msg_type_number_t    profiles_len,
+                int                 *result);
 
 
-/* PMUInterestNotification
+/* prime
+ *
+ * configd entry point
+ */
+void prime()
+{    
+    // Initialize battery averaging code
+    BatteryTimeRemaining_prime();
+    
+    // Initialize PMSettings code
+    PMSettings_prime();
+    
+    // Initialize PSLowPower code
+    PSLowPower_prime();
+
+    // Initialzie AutoWake code
+    AutoWake_prime();
+    RepeatingAutoWake_prime();
+    
+    // initialize Assertions code
+    PMAssertions_prime();
+        
+    return;
+}
+
+/* load
+ *
+ * configd entry point
+ */
+void load(CFBundleRef bundle, Boolean bundleVerbose)
+{
+    IONotificationPortRef           notify;    
+    io_object_t                     anIterator;
+
+    // Install notification on Power Source changes
+    initializePowerSourceChangeNotification();
+
+    // Install notification when the preferences file changes on disk
+    initializeESPrefsDynamicStore();
+
+    // Install notification on ApplePMU&IOPMrootDomain general interest messages
+    initializeInterestNotifications();
+
+    // Initialize MIG
+    initializeMIGServer();
+    
+    // Initialize timezone changed notifications
+    initializeTimezoneChangeNotifications();
+    
+    // Register for display dim/undim notifications
+    intializeDisplaySleepNotifications();
+    
+    // Register for SystemPower notifications
+    _pm_ack_port = IORegisterForSystemPower (0, &notify, SleepWakeCallback, &anIterator);
+    if ( _pm_ack_port != MACH_PORT_NULL ) {
+        if(notify) CFRunLoopAddSource(CFRunLoopGetCurrent(),
+                            IONotificationPortGetRunLoopSource(notify),
+                            kCFRunLoopDefaultMode);
+    }
+
+    return;
+}
+
+
+
+/* PMUInterest
  *
  * Receives and distributes messages from the PMU driver
  * These include legacy AutoWake requests and battery change notifications.
  */
 static void 
-PMUInterestNotification(void *refcon, io_service_t service, natural_t messageType, void *arg)
+PMUInterest(void *refcon, io_service_t service, natural_t messageType, void *arg)
 {    
     // Tell the AutoWake handler
     if((kIOPMUMessageLegacyAutoWake == messageType) ||
@@ -112,30 +220,66 @@ PMUInterestNotification(void *refcon, io_service_t service, natural_t messageTyp
         AutoWakePMUInterestNotification(messageType, (UInt32)arg);
 }
 
-/* RootDomainInterestNotification
- *
- * Receives and distributes messages from the IOPMrootDomain
- */
-static void 
-RootDomainInterestNotification(void *refcon, io_service_t service, natural_t messageType, void *arg)
+
+static void BatteryMatch(
+    void *refcon, 
+    io_iterator_t b_iter) 
 {
-    CFArrayRef          battery_info;
-
-    // Tell battery calculation code that battery status has changed
-    if(kIOPMMessageBatteryStatusHasChanged == messageType)
+    IOReturn                    ret;
+    IOPMBattery                 *tracking;
+    IONotificationPortRef       notify = (IONotificationPortRef)refcon;
+    io_registry_entry_t         battery;
+    io_object_t                 notification_ref;
+    
+    while(battery = (io_registry_entry_t)IOIteratorNext(b_iter)) 
     {
-        // get battery info
-        battery_info = isA_CFArray(_copyBatteryInfo());
-        if(!battery_info) return;
-
-        // Pass control over to PMSettings
-        PMSettingsBatteriesHaveChanged(battery_info);
-        // Pass control over to PMUBattery for battery calculation
-        BatteryTimeRemainingBatteriesHaveChanged(battery_info);
+        // Add battery to our list of batteries
+        tracking = _newBatteryFound(battery);
         
-        CFRelease(battery_info);
+        // And install an interest notification on it
+        ret = IOServiceAddInterestNotification(notify, battery, 
+                            kIOGeneralInterest, BatteryInterest,
+                            (void *)tracking, &notification_ref);
+
+        tracking->msg_port = notification_ref;
+        IOObjectRelease(battery);
     }
 }
+
+
+static void BatteryInterest(
+    void *refcon, 
+    io_service_t batt, 
+    natural_t messageType, 
+    void *messageArgument)
+{
+    CFArrayRef          battery_info = NULL;
+    IOPMBattery         *changed_batt = (IOPMBattery *)refcon;
+    IOPMBattery         **batt_stats;
+
+    if(kIOPMMessageBatteryStatusHasChanged == messageType)
+    {
+        // Update the arbiter
+        changed_batt->me = (io_registry_entry_t)batt;
+        _batteryChanged(changed_batt);
+
+
+        // Pass control over to PMUBattery for battery calculation
+        batt_stats = _batteries();        
+        BatteryTimeRemainingBatteriesHaveChanged(batt_stats);
+
+
+        // Get legacy battery info & pass control over to PMSettings
+        battery_info = isA_CFArray(_copyLegacyBatteryInfo());
+        if(!battery_info) return;
+        PMSettingsBatteriesHaveChanged(battery_info);
+
+        CFRelease(battery_info);
+    }
+
+    return;
+}
+
 
 /* SleepWakeCallback
  * 
@@ -156,7 +300,7 @@ SleepWakeCallback(void * port,io_service_t y,natural_t messageType,void * messag
 
     switch ( messageType ) {
     case kIOMessageSystemWillSleep:
-        tellSMU_GMTOffset(); // tell SMU what our timezone offset is
+        broadcastGMTOffset(); // tell clients what our timezone offset is
     case kIOMessageCanSystemSleep:
         IOAllowPowerChange(_pm_ack_port, (long)messageArgument);
         break;
@@ -191,21 +335,6 @@ ESPrefsHaveChanged(SCDynamicStoreRef store, CFArrayRef changedKeys, void *info)
         RepeatingAutoWakePrefsHaveChanged();
     }
 
-    if(CFArrayContainsValue(changedKeys, key_range, ConsoleUserKey))
-    {
-        PMSettingsConsoleUserHasChanged();
-        
-        CFArrayRef sessionList = SCDynamicStoreCopyConsoleInformation(store);
-        if (!sessionList)
-            sessionList = CFArrayCreate(kCFAllocatorDefault, NULL, 0, &kCFTypeArrayCallBacks);
-    
-        if (sessionList)
-        {
-            IORegistryEntrySetCFProperty(gIOResourceService, CFSTR(kIOConsoleUsersKey), sessionList);
-            CFRelease(sessionList);
-        }
-    }
-
     return;
 }
 
@@ -223,8 +352,13 @@ static void _ioupsd_exited(
     if(0 != status)
     {
         // ioupsd didn't exit cleanly.
-        // intentionally leave _alreadyRunningIOUPSD set so that we don't re-launch it.
-        syslog(LOG_ERR, "PowerManagement: /usr/libexec/ioupsd(%d) has exited with status %d\n", pid, status);
+        // Intentionally leave _alreadyRunningIOUPSD set so that we don't 
+        // re-launch it.
+        syslog(
+            LOG_ERR, 
+           "PowerManagement: /usr/libexec/ioupsd(%d) has exited with status %d\n", 
+           pid, 
+           status);
     } else {
         _alreadyRunningIOUPSD = 0;
     }
@@ -279,20 +413,44 @@ PowerSourcesHaveChanged(void *info)
     CFRelease(ps_blob);
 }
 
-
-/* tellSMU_GMTOffset
+/* timeZoneChangedCallback
  *
- * Tell the SMU what the seconds offset from GMT is.
- * Why does power management care which timezone we're in?
- * We don't, really. The SMU firmware needs to know for
- * a feature which shall remain nameless. Timezone info
- * is really only conveniently accessible from up here in 
- * user space, so we just keep track of it and tell PMU/SMU
- * whenever it changes. And this PM plugin was a vaguely
- * convenient place for this code to live.
+ * When our timezone offset changes, tell interested drivers.
  */
 static void 
-tellSMU_GMTOffset(void)
+timeZoneChangedCallBack(
+    CFNotificationCenterRef center, 
+    void *observer, 
+    CFStringRef notificationName, 
+    const void *object, 
+    CFDictionaryRef userInfo)
+{
+
+    if( CFEqual(notificationName, gTZNotificationNameString) )
+    {
+        broadcastGMTOffset();
+    }
+
+}
+
+
+/* broadcastGMTOffset
+ *
+ * Tell the timezone clients what the seconds offset from GMT is. This info
+ * is delivered via the kernel PMSettings interface.
+ *
+ * Notifications are sent:
+ *    - at boot time
+ *    - when timezone changes
+ *    - at sleep time*
+ *    - at display sleep time*
+ *
+ *    * PM configd does not receive a notification when daylight savings time
+ *      changes. In case the system has entered daylight savings time since
+ *      boot, we re-broadcast the tz offset at sleep and display sleep.
+ */
+static void 
+broadcastGMTOffset(void)
 {
     CFTimeZoneRef               tzr = NULL;
     CFNumberRef                 n = NULL;
@@ -309,12 +467,13 @@ tellSMU_GMTOffset(void)
     }
     
     // Tell the root domain what our timezone's offset from GMT is.
-    // IOPMrootdomain will relay the message on to AppleSMU.kext or
-    // ApplePMU.kext as appropriate for the system.
+    // IOPMrootdomain will relay the message on to interested PMSetting clients.
     _setRootDomainProperty(CFSTR("TimeZoneOffsetSeconds"), n);
+
 exit:
     if(tzr) CFRelease(tzr);
     if(n) CFRelease(n);
+    return;
 }
 
 /* displayPowerStateChange
@@ -325,8 +484,8 @@ exit:
  * (2) dim -> display sleep
  * (3) display sleep -> display sleep
  * 
- * We're interested in state transition 2. When that occurs on an SMU system
- * we'll tell the SMU what the system clock's offset from GMT is.
+ * We're interested in state transition 2. On transition to state 2 we
+ * broadcast the system clock's offset from GMT.
  */
 static void 
 displayPowerStateChange(void *ref, io_service_t service, natural_t messageType, void *arg)
@@ -338,7 +497,7 @@ displayPowerStateChange(void *ref, io_service_t service, natural_t messageType, 
             level++;
             if(2 == level) {
                 // Display is transition from dim to full sleep.
-                tellSMU_GMTOffset();            
+                broadcastGMTOffset();            
             }
             break;
             
@@ -380,13 +539,6 @@ initializeESPrefsDynamicStore(void)
                 kSCPreferencesKeyCommit);
     if(AutoWakePrefsKey) 
         CFArrayAppendValue(watched_keys, AutoWakePrefsKey);
-
-    gIOResourceService = IORegistryEntryFromPath(
-                MACH_PORT_NULL, 
-                kIOServicePlane ":/" kIOResourcesClass);
-    ConsoleUserKey = SCDynamicStoreKeyCreateConsoleUser( NULL /* CFAllocator */ );
-    if(ConsoleUserKey && gIOResourceService) 
-        CFArrayAppendValue(watched_keys, ConsoleUserKey);
 
     SCDynamicStoreSetNotificationKeys(energyDS, watched_keys, NULL);
 
@@ -457,13 +609,11 @@ pm_mig_demux(
     processed = powermanagement_server(request, reply);
     if(processed) return true;
     
-    // Check for no more senders and clean-up PM assertions from
-    // dead processes
+    // Check for tasks which have exited and clean-up PM assertions
     if(MACH_NOTIFY_DEAD_NAME == request->msgh_id) 
     {
-        //syslog(LOG_ERR, "Power Management: A client (port = %d) has unexpectedly died; \
-        //                cleaning up its outstanding assertions.\n", deadRequest->not_port); 
         cleanupAssertions(deadRequest->not_port);
+        mach_port_deallocate(mach_task_self(), deadRequest->not_port);
 
         reply->msgh_bits        = 0;
         reply->msgh_remote_port    = MACH_PORT_NULL;
@@ -485,7 +635,7 @@ pm_mig_demux(
 
 
 
-__private_extern__ void
+static void
 mig_server_callback(CFMachPortRef port, void *msg, CFIndex size, void *info)
 {
     mig_reply_error_t * bufRequest = msg;
@@ -592,7 +742,12 @@ kern_return_t _io_pm_set_active_profile(
     return KERN_SUCCESS;
 }
 
-
+static CFStringRef              
+serverMPCopyDescription(const void *info)
+{
+        return CFStringCreateWithFormat(NULL, NULL, CFSTR("<io pm server MP>"));
+}
+ 
 static void
 initializeMIGServer(void)
 {
@@ -601,7 +756,9 @@ initializeMIGServer(void)
     CFRunLoopSourceRef      cfmp_rls = 0;
     mach_port_t             our_port;
 
-    cf_mach_port = CFMachPortCreate(0, mig_server_callback, 0, 0);
+    CFMachPortContext       context  = { 0, (void *)1, NULL, NULL, serverMPCopyDescription };
+
+    cf_mach_port = CFMachPortCreate(0, mig_server_callback, &context, 0);
     if(!cf_mach_port) {
         goto bail;
     }
@@ -644,54 +801,48 @@ static void
 initializeInterestNotifications()
 {
     IONotificationPortRef       notify_port = 0;
-    IONotificationPortRef       r_notify_port = 0;
-    IONotificationPortRef       ups_notify_port = 0;
     io_object_t                 notification_ref = 0;
     io_service_t                pmu_service_ref = 0;
-    io_service_t                root_domain_ref = 0;
+    io_iterator_t               battery_iter = 0;
     CFRunLoopSourceRef          rlser = 0;
-    CFRunLoopSourceRef          r_rlser = 0;
-    CFRunLoopSourceRef          ups_rlser = 0;
     IOReturn                    ret;
     
     CFMutableDictionaryRef      matchingDict = 0;
     CFMutableDictionaryRef      propertyDict = 0;
     kern_return_t               kr;
     
-
-    // PMU
-    pmu_service_ref = IOServiceGetMatchingService(0, IOServiceNameMatching("ApplePMU"));
-    if(!pmu_service_ref) goto root_domain;
-
+    /* Notifier */
     notify_port = IONotificationPortCreate(0);
-    ret = IOServiceAddInterestNotification(notify_port, pmu_service_ref, 
-                                kIOGeneralInterest, PMUInterestNotification,
-                                0, &notification_ref);
-    if(kIOReturnSuccess != ret) goto root_domain;
-
     rlser = IONotificationPortGetRunLoopSource(notify_port);
-    if(!rlser) goto root_domain;
-
+    if(!rlser) goto finish;
     CFRunLoopAddSource(CFRunLoopGetCurrent(), rlser, kCFRunLoopDefaultMode);
-    
-    
-    // ROOT_DOMAIN
-root_domain:
-    root_domain_ref = IOServiceGetMatchingService(0, IOServiceNameMatching("IOPMrootDomain"));
-    if(!root_domain_ref) goto ups;
 
-    r_notify_port = IONotificationPortCreate(0);
-    ret = IOServiceAddInterestNotification(r_notify_port, root_domain_ref, 
-                                kIOGeneralInterest, RootDomainInterestNotification,
+    /* PMU */
+    pmu_service_ref = IOServiceGetMatchingService(0, IOServiceNameMatching("ApplePMU"));
+    if(!pmu_service_ref) goto battery;
+
+    ret = IOServiceAddInterestNotification(notify_port, pmu_service_ref, 
+                                kIOGeneralInterest, PMUInterest,
                                 0, &notification_ref);
-    if(kIOReturnSuccess != ret) goto ups;
+    if(kIOReturnSuccess != ret) goto battery;
 
-    r_rlser = IONotificationPortGetRunLoopSource(r_notify_port);
-    if(!r_rlser) goto ups;
+battery:
 
-    CFRunLoopAddSource(CFRunLoopGetCurrent(), r_rlser, kCFRunLoopDefaultMode);
+    // Get match notification on IOPMPowerSource
+    kr = IOServiceAddMatchingNotification(
+                                notify_port,
+                                kIOFirstMatchNotification,
+                                IOServiceMatching("IOPMPowerSource"),
+                                BatteryMatch,
+                                (void *)notify_port,
+                                &battery_iter);
+    if(KERN_SUCCESS != kr) goto ups;
+
+    // Install notifications on existing instances.
+    BatteryMatch((void *)notify_port, battery_iter);
     
 ups:
+
     matchingDict = IOServiceMatching(kIOServiceClass); 
     if (!matchingDict) goto finish;
             
@@ -706,65 +857,64 @@ ups:
     // Now set up a notification to be called when a device is first matched by I/O Kit.
     // Note that this will not catch any devices that were already plugged in so we take
     // care of those later.
-    ups_notify_port = IONotificationPortCreate(0);
-    kr = IOServiceAddMatchingNotification(ups_notify_port,            // notifyPort
-                                          kIOFirstMatchNotification,    // notificationType
-                                          matchingDict,            // matching
-                                          UPSDeviceAdded,        // callback
-                                          NULL,                // refCon
-                                          &_ups_added_noteref            // notification
-                                          );
+    kr = IOServiceAddMatchingNotification(
+                              notify_port, 
+                              kIOFirstMatchNotification, 
+                              matchingDict,
+                              UPSDeviceAdded,
+                              NULL,
+                              &_ups_added_noteref);
+
     matchingDict = 0; // reference consumed by AddMatchingNotification
     if ( kr != kIOReturnSuccess ) goto finish;
 
     // Check for existing matching devices and launch ioupsd if present.
-    UPSDeviceAdded( NULL, _ups_added_noteref );
+    UPSDeviceAdded( NULL, _ups_added_noteref);        
 
-    ups_rlser = IONotificationPortGetRunLoopSource(ups_notify_port);
-    if(!ups_rlser) goto finish;
-    CFRunLoopAddSource(CFRunLoopGetCurrent(), ups_rlser, kCFRunLoopDefaultMode);
-        
-
-finish:
+finish:   
     if(rlser) CFRelease(rlser);
-    if(r_rlser) CFRelease(r_rlser);
-    if(ups_rlser) CFRelease(ups_rlser);
-    if(notify_port) IOObjectRelease((io_object_t)notify_port);
-    if(r_notify_port) IOObjectRelease((io_object_t)r_notify_port);
-    if(ups_notify_port) IOObjectRelease((io_object_t)ups_notify_port);
     if(pmu_service_ref) IOObjectRelease(pmu_service_ref);
-    if(root_domain_ref) IOObjectRelease(root_domain_ref);
     if(matchingDict) CFRelease(matchingDict);
     if(propertyDict) CFRelease(propertyDict);
     return;
 }
 
-static bool
-systemHasSMU(void)
+/* initializeTimezoneChangeNotifications
+ *
+ * Sets up the tz notifications that we re-broadcast to all interested
+ * kernel clients listening via PMSettings
+ */
+static void
+initializeTimezoneChangeNotifications(void)
 {
-    static io_registry_entry_t              smuRegEntry = MACH_PORT_NULL;
-    static bool                             known = false;
+    CFNotificationCenterRef         distNoteCenter = NULL;
+    
+    gTZNotificationNameString = CFStringCreateWithCString(
+                        kCFAllocatorDefault,
+                        "NSSystemTimeZoneDidChangeDistributedNotification",
+                        kCFStringEncodingMacRoman);
 
-    if(known) return (smuRegEntry?true:false);
-
-    smuRegEntry = (io_registry_entry_t)IOServiceGetMatchingService(0,
-                        IOServiceNameMatching("AppleSMU"));
-    if(MACH_PORT_NULL == smuRegEntry)
+    distNoteCenter = CFNotificationCenterGetDistributedCenter();
+    if(distNoteCenter)
     {
-        // SMU not supported on this platform, no need to install tz handler
-        known = true;
-        return false;
+        CFNotificationCenterAddObserver(
+                       distNoteCenter, 
+                       NULL, 
+                       timeZoneChangedCallBack, 
+                       gTZNotificationNameString,
+                       NULL, 
+                       CFNotificationSuspensionBehaviorDeliverImmediately);
     }
-    IOObjectRelease(smuRegEntry);
-    known = true;
-    return true;
+
+    // Boot time - tell clients what our timezone offset is
+    broadcastGMTOffset(); 
 }
+
 
 /* intializeDisplaySleepNotifications
  *
- * Notifications on display sleep. Our only purpose for listening to these
- * is to tell the SMU what our timezone offset is when display sleep kicks
- * in. As such, we only install the notifications on machines with an SMU.
+ * Notifications on display sleep. We tell the tz+dst offset to our timezone 
+ * clients when display sleep kicks in. 
  */
 static void
 intializeDisplaySleepNotifications(void)
@@ -775,12 +925,10 @@ intializeDisplaySleepNotifications(void)
     io_object_t                 dimming_notification_object = MACH_PORT_NULL;
     IOReturn                    ret;
 
-    if(!systemHasSMU()) return;
-
-    display_wrangler = IOServiceGetMatchingService(NULL, IOServiceNameMatching("IODisplayWrangler"));
+    display_wrangler = IOServiceGetMatchingService(MACH_PORT_NULL, IOServiceNameMatching("IODisplayWrangler"));
     if(!display_wrangler) return;
     
-    note_port = IONotificationPortCreate(NULL);
+    note_port = IONotificationPortCreate(MACH_PORT_NULL);
     if(!note_port) goto exit;
     
     ret = IOServiceAddInterestNotification(note_port, display_wrangler, 
@@ -800,59 +948,6 @@ exit:
     // Do not release dimSrc because it's 'owned' by note_port, and both
     // must be kept around to receive this notification
     if(MACH_PORT_NULL != display_wrangler) IOObjectRelease(display_wrangler);
-}
-
-void
-prime()
-{    
-    // Initialize battery averaging code
-    BatteryTimeRemaining_prime();
-    
-    // Initialize PMSettings code
-    PMSettings_prime();
-    
-    // Initialize PSLowPower code
-    PSLowPower_prime();
-
-    // Initialzie AutoWake code
-    AutoWake_prime();
-    RepeatingAutoWake_prime();
-    
-    // initialize Assertions code
-    PMAssertions_prime();
-        
-    return;
-}
-
-void
-load(CFBundleRef bundle, Boolean bundleVerbose)
-{
-    IONotificationPortRef           notify;    
-    io_object_t                     anIterator;
-
-    // Install notification on Power Source changes
-    initializePowerSourceChangeNotification();
-
-    // Install notification when the preferences file changes on disk
-    initializeESPrefsDynamicStore();
-
-    // Install notification on ApplePMU&IOPMrootDomain general interest messages
-    initializeInterestNotifications();
-
-    // Initialize MIG
-    initializeMIGServer();
-    
-    // Register for display dim/undim notifications
-    intializeDisplaySleepNotifications();
-    
-    // Register for SystemPower notifications
-    _pm_ack_port = IORegisterForSystemPower (0, &notify, SleepWakeCallback, &anIterator);
-    if ( _pm_ack_port != MACH_PORT_NULL ) {
-        if(notify) CFRunLoopAddSource(CFRunLoopGetCurrent(),
-                            IONotificationPortGetRunLoopSource(notify),
-                            kCFRunLoopDefaultMode);
-    }
-
 }
 
 // use 'make' to build standalone debuggable executable 'pm'

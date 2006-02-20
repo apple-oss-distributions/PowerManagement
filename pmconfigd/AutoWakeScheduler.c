@@ -225,48 +225,6 @@ findEarliestUpcomingTime(CFMutableArrayRef arr)
     else return NULL;
 }
 
-// Sets the PMU to wakeup or power on at the time given in the dictionary.
-// If the CFDictionaryRef argument is NULL, clears the PMU autowakeup register.
-static bool 
-tellSettingsController(CFDictionaryRef   dat, CFStringRef command)
-{
-    CFAbsoluteTime          now, wake_time;
-    long int                diff_secs;
-    IOReturn                ret;
-    bool                    return_val = false;
-    CFNumberRef             seconds_delta = NULL;
-    
-    if(!command) goto exit;
-    if(!dat) {
-        // default on NULL input: clear wakeup timer.
-        diff_secs = 0;
-    } else {
-        // Assume a well-formed entry since we've been doing thorough type-checking
-        // in the find & purge functions
-        now = CFAbsoluteTimeGetCurrent();
-        if(dat)
-            wake_time = CFDateGetAbsoluteTime(CFDictionaryGetValue(dat, CFSTR(kIOPMPowerEventTimeKey)));
-        else wake_time = now;
-        diff_secs = lround(wake_time - now);
-        if(diff_secs < 0) goto exit;
-    }
-    
-    // Package diff_secs as a CFNumber
-    seconds_delta = CFNumberCreate(0, kCFNumberLongType, &diff_secs);
-    if(!seconds_delta) goto exit;
-    
-    ret = _setRootDomainProperty(command, seconds_delta);
-    if(kIOReturnSuccess != ret)
-    {
-        return_val = false;
-        goto exit;
-    }
-        
-    return_val = true;
-exit:
-    if(seconds_delta) CFRelease(seconds_delta);
-    return return_val;
-}
 
 // Finds HID service
 static kern_return_t openHIDService(mach_port_t io_master_port, io_connect_t *connection)
@@ -339,6 +297,12 @@ static void
 _setScheduledEventType(CFMutableDictionaryRef event, CFStringRef type)
 {
     CFDictionarySetValue(event, CFSTR(kIOPMPowerEventTypeKey), type);
+}
+
+static CFDateRef
+_getScheduledEventDate(CFDictionaryRef event)
+{
+    return isA_CFDate(CFDictionaryGetValue(event, CFSTR(kIOPMPowerEventTimeKey)));
 }
 
 
@@ -439,7 +403,11 @@ schedulePowerOnTime(void)
         CFRunLoopAddTimer(CFRunLoopGetCurrent(), poweron_timer, kCFRunLoopDefaultMode);
         CFRelease(poweron_timer);
     }
-    tellSettingsController(upcoming, CFSTR(kIOPMAutoPowerOn));
+    
+    IOPMSchedulePowerEvent(
+            _getScheduledEventDate(upcoming),
+            NULL,
+            CFSTR(kIOPMAutoPowerScheduleImmediate) );
 
     CFRelease(upcoming);    
 }
@@ -478,7 +446,11 @@ scheduleWakeTime(void)
     
     tmr_context.info = (void *)upcoming;    
     
-    tellSettingsController(upcoming, CFSTR(kIOPMAutoWake));
+    IOPMSchedulePowerEvent(
+            _getScheduledEventDate(upcoming),
+            NULL,
+            CFSTR(kIOPMAutoWakeScheduleImmediate));
+
  
     fire_time = CFDateGetAbsoluteTime(CFDictionaryGetValue(upcoming, CFSTR(kIOPMPowerEventTimeKey)));
     wakeup_timer = CFRunLoopTimerCreate(0, fire_time, 0.0, 0, 
@@ -640,9 +612,14 @@ AutoWakePrefsHaveChanged(void)
     copyScheduledPowerChangeArrays();
     
     // set AutoWake=0 in case our scheduled wakeup was just cancelled
-    tellSettingsController(NULL, CFSTR(kIOPMAutoWake));    
+    IOPMSchedulePowerEvent(
+            NULL,   NULL,
+            CFSTR(kIOPMAutoWakeScheduleImmediate) );
+
     // set AutoPower=0 in case our scheduled wakeup was just cancelled
-    tellSettingsController(NULL, CFSTR(kIOPMAutoPowerOn));
+    IOPMSchedulePowerEvent(
+            NULL,   NULL,
+            CFSTR(kIOPMAutoPowerScheduleImmediate) );
 
     scheduleWakeTime();
     schedulePowerOnTime();
@@ -675,7 +652,10 @@ AutoWakePMUInterestNotification(natural_t messageType, UInt32 messageArgument)
         CFAbsoluteTime      wakey_time;
         wakey_time = CFAbsoluteTimeGetCurrent() + (CFAbsoluteTime)messageArgument;
         wakey_date = CFDateCreate(kCFAllocatorDefault, wakey_time);
-        IOPMSchedulePowerEvent(wakey_date, CFSTR("Legacy PMU setProperties"), CFSTR(kIOPMAutoWake));
+        IOPMSchedulePowerEvent(
+                        wakey_date, 
+                        CFSTR("Legacy PMU setProperties"), 
+                        CFSTR(kIOPMAutoWake));
         CFRelease(wakey_date);
     } else if(kIOPMUMessageLegacyAutoPower == messageType)
     {
@@ -683,7 +663,10 @@ AutoWakePMUInterestNotification(natural_t messageType, UInt32 messageArgument)
         CFAbsoluteTime      wakey_time;
         wakey_time = CFAbsoluteTimeGetCurrent() + (CFAbsoluteTime)messageArgument;
         wakey_date = CFDateCreate(kCFAllocatorDefault, wakey_time);
-        IOPMSchedulePowerEvent(wakey_date, CFSTR("Legacy PMU setProperties"), CFSTR(kIOPMAutoPowerOn));
+        IOPMSchedulePowerEvent(
+                        wakey_date, 
+                        CFSTR("Legacy PMU setProperties"), 
+                        CFSTR(kIOPMAutoPowerOn));
         CFRelease(wakey_date);
     }
     

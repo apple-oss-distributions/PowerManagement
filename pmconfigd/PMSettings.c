@@ -220,10 +220,10 @@ _copyPMSettings(void)
             if(!sys_profile) continue;
             settings_per_power_source = CFDictionaryGetValue(sys_profile, active_profile_dict_keys[i]);
         }
-        syslog(LOG_INFO, "PM configd:_copyPMSettings(): using profile #%d for power source %s\n", 
+        syslog(LOG_INFO, "PM configd:_copyPMSettings(): using profile #%d for power source %s", 
             profile_index, CFStringGetCStringPtr(active_profile_dict_keys[i], kCFStringEncodingMacRoman));
         if(!settings_per_power_source) {
-            syslog(LOG_INFO, "ERROR ERROR ERROR no settings_per_power_source available!\n");
+            syslog(LOG_INFO, "ERROR ERROR ERROR no settings_per_power_source available!");
             continue;
         }
         tmp_settings = CFDictionaryCreateCopy(kCFAllocatorDefault, settings_per_power_source);
@@ -406,13 +406,13 @@ __private_extern__ void PMSettingsPSChange(CFTypeRef ps_blob)
 __private_extern__ void
 PMSettingsBatteriesHaveChanged(CFArrayRef battery_info)
 {
-    CFBooleanRef			        rem_bool;
-    int					        flags;
-    int					        changed_flags;
-    int                                 	settings_changed = 0;
-    static int				        old_flags = 0;
-    io_iterator_t			        it;
-    static io_registry_entry_t			root_domain = 0;
+    CFBooleanRef                    rem_bool;
+    int                             flags;
+    int                             changed_flags;
+    int                             settings_changed = 0;
+    static int                      old_flags = 0;
+    io_iterator_t                   it;
+    static io_registry_entry_t      root_domain = 0;
 
     if(!root_domain) 
     {
@@ -437,11 +437,11 @@ PMSettingsBatteriesHaveChanged(CFArrayRef battery_info)
     old_flags = flags;
     
     // Do we need to override the low processor speed setting?
-    if(changed_flags & kForceLowSpeed)
+    if(changed_flags & kIOPMForceLowSpeed)
     {
     
         settings_changed = 1;
-        if(flags & kForceLowSpeed)
+        if(flags & kIOPMForceLowSpeed)
             g_overrides |= kPMForceLowSpeedProfile;
         else g_overrides &= ~kPMForceLowSpeedProfile;
     }

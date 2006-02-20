@@ -30,14 +30,19 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreFoundation/CFDateFormatter.h>
+
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <SystemConfiguration/SCValidation.h>
+
+#include <IOKit/IOMessage.h>
+#include <IOKit/pwr_mgt/IOPM.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #include <IOKit/pwr_mgt/IOPMLibPrivate.h>
 #include <IOKit/pwr_mgt/IOPMUPSPrivate.h>
 #include <IOKit/ps/IOPSKeys.h>
 #include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/ps/IOPowerSourcesPrivate.h>
+
 
 #include <string.h>
 #include <ctype.h>
@@ -119,6 +124,7 @@
 #define ARG_BATT            "batt"
 #define ARG_PS              "ps"
 #define ARG_PSLOG           "pslog"
+#define ARG_PSRAW           "rawlog"
 
 // special
 #define ARG_BOOT            "boot"
@@ -196,6 +202,16 @@ static void show_scheduled_events(void);
 static void show_power_sources(int which);
 static void log_ps_change_handler(void *);
 static int log_power_source_changes(int which);
+static int log_raw_power_source_changes(void);
+static void log_raw_battery_interest(
+        void *refcon, 
+        io_service_t batt, 
+        natural_t messageType, 
+        void *messageArgument);
+static void log_raw_battery_match(
+        void *refcon, 
+        io_iterator_t b_iter);
+static void print_raw_battery_state(io_registry_entry_t b_reg);
 static void print_setting_value(CFTypeRef a);
 static void print_cpu_override_pids(void);
 static void print_time_of_day_to_buf(int m, char *buf);
@@ -915,6 +931,15 @@ static void show_scheduled_events(void)
         printf("No scheduled events.\n"); fflush(stdout);
 }
 
+
+
+
+/******************************************************************************/
+/*                                                                            */
+/*     PS LOGGING                                                             */
+/*                                                                            */
+/******************************************************************************/
+
 static void show_power_sources(int which)
 {
     CFTypeRef           ps_info = IOPSCopyPowerSourcesInfo();
@@ -933,9 +958,11 @@ static void show_power_sources(int which)
     CFStringRef         state;
     CFStringRef         transport;
     char                _name[60];
-    int                 _charge, _capacity;
-    int                 _hours, _minutes;
-    int                 _charging;
+    int                 _hours = 0;
+    int                 _minutes = 0;
+    int                 _charge = 0;
+    int                 _capacity = 0;
+    int                 _charging = 0;
     
     if(!ps_info) {
         printf("No power source info available\n");
@@ -1066,15 +1093,214 @@ static void log_ps_change_handler(void *info)
 static int log_power_source_changes(int which)
 {
     CFRunLoopSourceRef          rls = NULL;
-    rls = IOPSNotificationCreateRunLoopSource(log_ps_change_handler, which);
+    rls = IOPSNotificationCreateRunLoopSource(log_ps_change_handler, (void *)which);
     if(!rls) return kParseInternalError;
     printf("pmset is in logging mode now. Hit ctrl-c to exit.\n");
     // and show initial power source state:
-    log_ps_change_handler(which);
+    log_ps_change_handler((void *)which);
     CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, kCFRunLoopDefaultMode);
     CFRelease(rls);
     CFRunLoopRun();
+    
+    return 0;
 }
+
+
+
+
+/******************************************************************************/
+/*                                                                            */
+/*     RAW PS LOGGING                                                         */
+/*                                                                            */
+/******************************************************************************/
+
+
+static void print_raw_battery_state(io_registry_entry_t b_reg)    
+{
+    CFBooleanRef            boo;
+    CFNumberRef             n;
+    int                     tmp;
+    int                     cur_cap = -1;
+    int                     max_cap = -1;
+    CFMutableDictionaryRef  prop = NULL;
+    IOReturn                ret;
+    
+    ret = IORegistryEntryCreateCFProperties(b_reg, &prop, 0, 0);
+    if( (kIOReturnSuccess != ret) || (NULL == prop) )
+    {
+        printf("Couldn't read battery status; error = 0%08x\n", ret);
+        return;
+    }
+    
+    boo = CFDictionaryGetValue(prop, CFSTR(kIOPMPSExternalConnectedKey));
+    printf("  external connected = %s\n", 
+                (kCFBooleanTrue == boo) ? "yes" : "no");
+
+    boo = CFDictionaryGetValue(prop, CFSTR(kIOPMPSBatteryInstalledKey));
+    printf("  battery present = %s\n", 
+                (kCFBooleanTrue == boo) ? "yes" : "no");
+
+    boo = CFDictionaryGetValue(prop, CFSTR(kIOPMPSIsChargingKey));
+    printf("  battery charging = %s\n", 
+                (kCFBooleanTrue == boo) ? "yes" : "no");
+
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSCurrentCapacityKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &cur_cap);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSMaxCapacityKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &max_cap);
+    }
+    
+    if( (-1 != cur_cap) && (-1 != max_cap) )
+    {
+        printf("  cap = %d/%d\n", cur_cap, max_cap);
+    }
+    
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSTimeRemainingKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &tmp);
+        printf("  time remaining = %d:%02d\n", tmp/60, tmp%60);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSAmperageKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &tmp);
+        printf("  current = %d\n", tmp);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSCycleCountKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &tmp);
+        printf("  cycle count = %d\n", tmp);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSLocationKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &tmp);
+        printf("  location = %d\n", tmp);
+    }
+    
+    printf("\n");
+
+    CFRelease(prop);
+    return;
+}
+
+
+static void log_raw_battery_match(
+    void *refcon, 
+    io_iterator_t b_iter) 
+{
+    IOReturn                    ret;
+    IONotificationPortRef       notify = *((IONotificationPortRef *)refcon);
+    io_registry_entry_t         battery;
+    io_object_t                 notification_ref;
+    int                         found = false;
+    
+    while(battery = (io_registry_entry_t)IOIteratorNext(b_iter)) 
+    {
+        found = true;        
+        printf(" * Battery matched at registry = %d\n", (int32_t)battery);
+
+        print_raw_battery_state(battery);
+        
+        // And install an interest notification on it
+        ret = IOServiceAddInterestNotification(notify, battery, 
+                            kIOGeneralInterest, log_raw_battery_interest,
+                            NULL, &notification_ref);
+
+        IOObjectRelease(battery);
+    }
+    
+    if(!found) {
+        printf("  (no batteries found; waiting)\n");
+    }    
+}
+
+
+static void log_raw_battery_interest(
+    void *refcon, 
+    io_service_t batt, 
+    natural_t messageType, 
+    void *messageArgument)
+{
+    CFDateFormatterRef  date_format;
+    CFTimeZoneRef       tz;
+    CFStringRef         time_date;
+    CFLocaleRef         loc;
+    char                _date[60];
+
+
+    if(kIOPMMessageBatteryStatusHasChanged == messageType)
+    {
+    
+        loc = CFLocaleCopyCurrent();
+        date_format = CFDateFormatterCreate(kCFAllocatorDefault, loc,
+            kCFDateFormatterShortStyle, kCFDateFormatterLongStyle);        
+        CFRelease(loc);
+        tz = CFTimeZoneCopySystem();
+        CFDateFormatterSetProperty(date_format, kCFDateFormatterTimeZone, tz);
+        CFRelease(tz);
+        time_date = CFDateFormatterCreateStringWithAbsoluteTime(kCFAllocatorDefault,
+            date_format, CFAbsoluteTimeGetCurrent());
+        CFRelease(date_format);
+        if(time_date)
+        {
+            CFStringGetCString(time_date, _date, 60, kCFStringEncodingMacRoman);
+            printf("%s\n", _date); fflush(stdout);
+        }
+        CFRelease(time_date);
+    
+
+        print_raw_battery_state((io_registry_entry_t)batt);
+
+    }
+
+    return;
+}
+
+
+static int log_raw_power_source_changes(void)
+{
+    IONotificationPortRef       notify_port = 0;
+    io_iterator_t               battery_iter = 0;
+    CFRunLoopSourceRef          rlser = 0;
+    IOReturn                    ret;
+
+    printf("pmset is in RAW logging mode now. Hit ctrl-c to exit.\n");
+
+    notify_port = IONotificationPortCreate(0);
+    rlser = IONotificationPortGetRunLoopSource(notify_port);
+    if(!rlser) return 0;
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), rlser, kCFRunLoopDefaultMode);
+
+
+    ret = IOServiceAddMatchingNotification(
+                              notify_port,
+                              kIOFirstMatchNotification,  
+                              IOServiceMatching("IOPMPowerSource"), 
+                              log_raw_battery_match, 
+                              (void *)&notify_port,  
+                              &battery_iter);
+    if(KERN_SUCCESS != ret){
+         printf("!!Error prevented matching notifications; err = 0x%08x\n", ret);
+    }
+
+    // Install notifications on existing instances.
+    log_raw_battery_match((void *)&notify_port, battery_iter);
+        
+    CFRunLoopRun();
+    
+    // should never return from CFRunLoopRun
+    return 0;
+}
+
+
+
+/******************************************************************************/
+/*                                                                            */
+/*     BORING SETTINGS & PARSING                                              */
+/*                                                                            */
+/******************************************************************************/
 
 
 static int checkAndSetIntValue(char *valstr, CFStringRef settingKey, int apply,
@@ -1572,7 +1798,7 @@ static int parseArgs(int argc,
     CFDictionaryRef             tmp_profiles = 0;
     CFMutableDictionaryRef      local_profiles = 0;
     CFDictionaryRef             tmp_ups_settings = 0;
-    CFMutableDictionaryRef      local_ups_settings;
+    CFMutableDictionaryRef      local_ups_settings = 0;
     CFDictionaryRef             tmp_settings = 0;
     CFMutableDictionaryRef      local_settings = 0;
     CFDictionaryRef             tmp_battery = 0;
@@ -1736,6 +1962,11 @@ static int parseArgs(int argc,
                         // continuously log PS changes until user ctrl-c exits
                         // or return kParseInternalError if something screwy happened
                         return log_power_source_changes(ApplyToBattery | ApplyToUPS);
+                    } else if(!strcmp(argv[i], ARG_PSRAW))
+                    {
+                        // continuously log PS changes until user ctrl-c exits
+                        // log via interest notes on the IOPMPowerSource nodes
+                        return log_raw_power_source_changes();
                     } else {
                         return kParseBadArgs;
                     }

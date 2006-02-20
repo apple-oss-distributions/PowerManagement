@@ -10,11 +10,15 @@ PROJ_ROOT = ..
 UPS_DIR = $(PROJ_ROOT)/ioupsd
 
 CFLAGS = -g -DSTANDALONE
+FRAMEWORKS = -framework IOKit -framework CoreFoundation -framework SystemConfiguration
 
 all: pmconfigd
 
 pmconfigd: $(OBJ_FILES) $(H_FILES)
-	cc -o pm -g -DSTANDALONE $(OBJ_FILES) -framework IOKit -framework CoreFoundation -framework SystemConfiguration
+	cc -o pm $(CFLAGS) $(OBJ_FILES) $(FRAMEWORKS)
+
+loud: $(OBJ_FILES) $(H_FILES)
+	cc -o pm -Wall $(CFLAGS) $(OBJ_FILES) $(FRAMEWORKS)
 
 powermanagement.h powermanagementServer.c: powermanagement.defs
 	mig powermanagement.defs

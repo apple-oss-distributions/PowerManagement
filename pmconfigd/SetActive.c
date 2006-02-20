@@ -47,9 +47,6 @@ static int callerIsConsole(int uid, int gid);
 
 extern CFMachPortRef            serverMachPort;
 
-// external
-__private_extern__ void mig_server_callback(CFMachPortRef port, void *msg, CFIndex size, void *info);
-
 // forward
 __private_extern__ void     cleanupAssertions(mach_port_t dead_port);
 static void                 evaluateAssertions(void);
@@ -305,8 +302,6 @@ kern_return_t _io_pm_assertion_create
 )
 {
     CFMachPortRef           cf_port_for_task = NULL;
-    mach_port_name_t        rcv_right = MACH_PORT_NULL;
-    kern_return_t           kern_result = KERN_SUCCESS;
     CFDictionaryRef         tmp_task = NULL;
     CFMutableDictionaryRef  this_task = NULL;
     CFArrayRef              tmp_assertions = NULL;
@@ -319,7 +314,7 @@ kern_return_t _io_pm_assertion_create
     // and it gets a valid [0, (kAssertionsArraySize-1)] value below.
     *assertion_id = -1;
 
-    cf_port_for_task = CFMachPortCreateWithPort(0, task, mig_server_callback, 0, 0);
+    cf_port_for_task = CFMachPortCreateWithPort(0, task, NULL, NULL, 0);
     if(!cf_port_for_task) {
         *result = kIOReturnNoMemory;
         goto exit;
@@ -329,6 +324,7 @@ kern_return_t _io_pm_assertion_create
        (tmp_task = CFDictionaryGetValue(assertionsDict, cf_port_for_task)) )
     {
         // There is an existing dictionary tracking this process's assertions.
+        mach_port_deallocate(mach_task_self(), task);
         this_task = CFDictionaryCreateMutableCopy(0, 0, tmp_task);
         CFDictionarySetValue(assertionsDict, cf_port_for_task, this_task);
     } else {
@@ -338,10 +334,11 @@ kern_return_t _io_pm_assertion_create
                     &kCFTypeDictionaryKeyCallBacks,
                     &kCFTypeDictionaryValueCallBacks);
         if(!this_task){
+            mach_port_deallocate(mach_task_self(), task);
             *result = kIOReturnNoMemory;
             goto exit;
         }
-        CFDictionarySetValue(this_task, CFSTR("task"), cf_port_for_task);    
+        CFDictionarySetValue(this_task, kIOPMTaskPortKey, cf_port_for_task);    
 
         // Register for a dead name notification on this task_t
         err = mach_port_request_notification(
@@ -356,10 +353,15 @@ kern_return_t _io_pm_assertion_create
         {
             syslog(LOG_ERR, "mach port request notification error %s(%08x)\n",
                 mach_error_string(err), err);
+            mach_port_deallocate(mach_task_self(), task);
             *result = err;
             goto exit;
         }
                     
+        if (oldNotify != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), oldNotify);
+        }
+
         // assertionsDict is the global dictionary that maps a process's task_t
         // to all power management assertions it has created.
         if(!assertionsDict) {
@@ -426,6 +428,10 @@ exit:
     if(this_task) CFRelease(this_task);
     if(assertions) CFRelease(assertions);
     if(cf_port_for_task) CFRelease(cf_port_for_task);
+    if((profile != NULL) && (profileCnt > 0)) {
+        vm_deallocate(mach_task_self(), (vm_address_t)profile, profileCnt);
+    }
+
     return KERN_SUCCESS;
 }
 
@@ -442,13 +448,16 @@ kern_return_t _io_pm_assertion_release
     CFDictionaryRef         calling_task = NULL;
     CFMutableArrayRef       assertions = NULL;              
     CFTypeRef               assertion_to_release = NULL;
+    int                     i;
+    int                     n;
+    Boolean                 releaseTask;
 
     if((assertion_id < 0) || (assertion_id >= kAssertionsArraySize)) {
         *return_code = kIOReturnBadArgument;
         goto exit;
     }
 
-    cf_port_for_task = CFMachPortCreateWithPort(0, task, mig_server_callback, 0, 0);
+    cf_port_for_task = CFMachPortCreateWithPort(0, task, NULL, NULL, 0);
     if(!cf_port_for_task) {
         *return_code = kIOReturnNoMemory;
         goto exit;
@@ -476,12 +485,31 @@ kern_return_t _io_pm_assertion_release
     
     // Release it
     CFArraySetValueAtIndex(assertions, assertion_id, kCFBooleanFalse);
-    
+
+    // Check for last reference and cleanup
+    releaseTask = TRUE;
+    n = CFArrayGetCount(assertions);
+    for (i =0; i < n; i++) {
+        CFTypeRef	assertion;
+
+        assertion = CFArrayGetValueAtIndex(assertions, i);
+        if (!CFEqual(assertion, kCFBooleanFalse)) {
+            releaseTask = FALSE;
+            break;
+        }
+    }
+    if (releaseTask) {
+        CFDictionaryRemoveValue(assertionsDict, cf_port_for_task);
+        mach_port_deallocate(mach_task_self(), task);
+    }
+
+    // Re-evaluate
     evaluateAssertions();
     
     *return_code = kIOReturnSuccess;    
 exit:
     if(cf_port_for_task) CFRelease(cf_port_for_task);
+    mach_port_deallocate(mach_task_self(), task);
     return KERN_SUCCESS;   
 }
 
@@ -634,27 +662,23 @@ cleanupAssertions(
 )
 {
     CFMachPortRef               cf_task_port = NULL;
-    int                         dead_pid = -1;
     
     if(!assertionsDict) {
         return;
     }
     
     // Clean up after this dead process
-    cf_task_port = CFMachPortCreateWithPort(0, dead_port, mig_server_callback, 0, 0);
+    cf_task_port = CFMachPortCreateWithPort(0, dead_port, NULL, NULL, 0);
     if(!cf_task_port) return;
 
-    // Log a message on this exceptional circumstance.
-    pid_for_task(dead_port, &dead_pid);
-//    syslog(LOG_ERR, "Power Management cleaning up assertions for pid %d (port %d).\n", \
-        dead_pid, dead_port);
-    
-    // Remove the process's tracking data
-    // Deletes the entire dictionary that tracks this process.
-    CFDictionaryRemoveValue(assertionsDict, cf_task_port);
+    if (CFDictionaryContainsKey(assertionsDict, cf_task_port)) {
+        // Remove the process's tracking data
+        CFDictionaryRemoveValue(assertionsDict, cf_task_port);
+        mach_port_deallocate(mach_task_self(), dead_port);
+        evaluateAssertions();
+    }
 
-    evaluateAssertions();
-exit:
+    CFRelease(cf_task_port);
     return;
 }
 

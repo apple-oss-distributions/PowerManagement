@@ -337,6 +337,9 @@ RepeatingAutoWakePrefsHaveChanged(void)
 
     cancelAllRepeatingEvents();
     
+    repeatingPowerOff = NULL;
+    repeatingPowerOn = NULL;
+    
     if(!currentRepeatingEvents) return;
 
     repeatingPowerOff = isA_CFDictionary(CFDictionaryGetValue(currentRepeatingEvents, CFSTR(kIOPMRepeatingPowerOffKey)));

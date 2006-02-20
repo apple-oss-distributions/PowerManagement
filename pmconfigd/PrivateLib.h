@@ -23,17 +23,38 @@
 #ifndef _privatelib_h_
 #define _privatelib_h_
 
-__private_extern__ void _askNicelyThenShutdownSystem(void);
+struct IOPMBattery {
+    io_registry_entry_t     me;
+    io_object_t             msg_port;
+    CFMutableDictionaryRef  properties;
+    bool                    externalConnected:1;
+    bool                    externalChargeCapable:1;
+    bool                    isCharging:1;
+    bool                    isPresent:1;
+    int                     currentCap;
+    int                     maxCap;
+    int                     voltage;
+    int                     amperage;
+    int                     cycleCount;
+    int                     location;
+    int                     hwReportedTR;
+    int                     swCalculatedTR;
+};
+typedef struct IOPMBattery IOPMBattery;
 
+__private_extern__ IOPMBattery **_batteries(void);
+__private_extern__ IOPMBattery *_newBatteryFound(io_registry_entry_t);
+__private_extern__ void _batteryChanged(IOPMBattery *);
+__private_extern__ int  _batteryCount(void);
+__private_extern__ void  _removeBattery(io_registry_entry_t);
+
+// Returns 10.0 - 10.4 style IOPMCopyBatteryInfo dictionary, when possible.
+__private_extern__ CFArrayRef _copyLegacyBatteryInfo(void);
+
+__private_extern__ void _askNicelyThenShutdownSystem(void);
 __private_extern__ void _askNicelyThenSleepSystem(void);
 
-//__private_extern__ void _doNiceShutdown(void);
-
-__private_extern__ CFArrayRef _copyBatteryInfo(void);
-
 __private_extern__ CFUserNotificationRef _showUPSWarning(void);
-
-//__private_extern__ CFUserNotificationRef _showLowBatteryWarning(void);
 
 __private_extern__ IOReturn _setRootDomainProperty(
                                     CFStringRef     key,

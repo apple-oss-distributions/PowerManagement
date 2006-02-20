@@ -22,8 +22,10 @@
 
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <SystemConfiguration/SCValidation.h>
 #include <IOKit/IOReturn.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
+#include <IOKit/pwr_mgt/IOPM.h>
 #include <syslog.h>
 #include "PrivateLib.h"
 
@@ -36,6 +38,10 @@ enum
 #define kPowerManagerActionNotificationName "com.apple.powermanager.action"
 #define kPowerManagerActionKey "action"
 #define kPowerManagerValueKey "value"
+
+// Tracks system battery state
+static int batCount = 0;
+static IOPMBattery **batteries = NULL;
 
 /******
  * Do not remove DUMMY macros
@@ -74,19 +80,20 @@ enum
             CFSTR("Please connect your computer to AC power. If you do not, your computer will go to sleep in a few minutes to preserve the contents of memory."), \
             NULL);
 
+
 __private_extern__ IOReturn 
 _setRootDomainProperty(
     CFStringRef                 key, 
     CFTypeRef                   val) 
 {
-    mach_port_t                 masterPort;
     io_iterator_t               it;
     io_registry_entry_t         root_domain;
     IOReturn                    ret;
 
-    IOMasterPort(bootstrap_port, &masterPort);
-    if(!masterPort) return kIOReturnError;
-    IOServiceGetMatchingServices(masterPort, IOServiceNameMatching("IOPMrootDomain"), &it);
+    IOServiceGetMatchingServices(
+                    MACH_PORT_NULL, 
+                    IOServiceNameMatching("IOPMrootDomain"), 
+                    &it);
     if(!it) return kIOReturnError;
     root_domain = (io_registry_entry_t)IOIteratorNext(it);
     if(!root_domain) return kIOReturnError;
@@ -95,14 +102,13 @@ _setRootDomainProperty(
 
     IOObjectRelease(root_domain);
     IOObjectRelease(it);
-    IOObjectRelease(masterPort);
     return ret;
 }
 
 
 static void sendNotification(int command)
 {
-    CFMutableDictionaryRef	dict = NULL;
+    CFMutableDictionaryRef   dict = NULL;
     int numberOfSeconds = 600;
     
     CFNumberRef secondsValue = CFNumberCreate( NULL, kCFNumberIntType, &numberOfSeconds );
@@ -135,23 +141,141 @@ __private_extern__ void _askNicelyThenSleepSystem(void)
     sendNotification(PowerMangerScheduledSleep);
 }
 
-/*
-__private_extern__ void _doNiceShutdown(void)
+// Accessor for internal battery structs
+__private_extern__ IOPMBattery **_batteries(void)
 {
+    return batteries;
 }
-*/
 
-__private_extern__ CFArrayRef _copyBatteryInfo(void) 
+__private_extern__ bool _batterySupports(
+    io_registry_entry_t which, 
+    CFStringRef what)
 {
-    static mach_port_t 		master_device_port = 0;
-    kern_return_t       	kr;
-    int				ret;
-    CFArrayRef			battery_info = NULL;
+    int         i = 0;
+    bool        found = false;
     
-    if(!master_device_port) kr = IOMasterPort(bootstrap_port,&master_device_port);
+    for(i=0; i<batCount; i++) 
+    {
+        if(which != batteries[i]->me) continue;
+        if(CFDictionaryGetValue(batteries[i]->properties, what)) 
+        {
+            found = true;
+            break;
+        }
+    }
+    
+    return found;
+}
+
+static void _unpackBatteryState(IOPMBattery *b, CFDictionaryRef prop)    
+{
+    CFBooleanRef    boo;
+    CFNumberRef     n;
+    
+    if(!isA_CFDictionary(prop)) return;
+    
+    boo = CFDictionaryGetValue(prop, CFSTR(kIOPMPSExternalConnectedKey));
+    b->externalConnected = (kCFBooleanTrue == boo);
+
+    boo = CFDictionaryGetValue(prop, CFSTR(kIOPMPSExternalChargeCapableKey));
+    b->externalChargeCapable = (kCFBooleanTrue == boo);
+
+    boo = CFDictionaryGetValue(prop, CFSTR(kIOPMPSBatteryInstalledKey));
+    b->isPresent = (kCFBooleanTrue == boo);
+
+    boo = CFDictionaryGetValue(prop, CFSTR(kIOPMPSIsChargingKey));
+    b->isCharging = (kCFBooleanTrue == boo);
+
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSCurrentCapacityKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->currentCap);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSMaxCapacityKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->maxCap);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSTimeRemainingKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->hwReportedTR);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSAmperageKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->amperage);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSCycleCountKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->cycleCount);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSLocationKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->location);
+    }
+
+    return;
+}
+
+__private_extern__ int  _batteryCount(void)
+{
+    return batCount;
+}
+
+__private_extern__ IOPMBattery *_newBatteryFound(io_registry_entry_t where)
+{
+    int             new_battery_index = batCount++;
+    IOPMBattery     *new_battery = NULL;
+
+    batteries = (IOPMBattery **)realloc(batteries, 
+                                    batCount*sizeof(IOPMBattery *));
+    new_battery = calloc(1, sizeof(IOPMBattery));
+    batteries[new_battery_index] = new_battery;
+    
+    new_battery->me = where;
+
+    _batteryChanged(new_battery);
+
+    return new_battery;
+}
+
+
+__private_extern__ void _batteryChanged(IOPMBattery *changed_battery)
+{
+    kern_return_t       kr;
+    
+    if(0 == batCount) return;
+    
+    if(!changed_battery) { 
+        // This is unexpected; we're not tracking this battery
+        return;
+    }
+    
+    // Free the last set of properties
+    if(changed_battery->properties) { 
+        CFRelease(changed_battery->properties);
+        changed_battery->properties = NULL;
+    }
+    
+    kr = IORegistryEntryCreateCFProperties(
+                            changed_battery->me, 
+                            &(changed_battery->properties),
+                            kCFAllocatorDefault, 0);
+    if(KERN_SUCCESS != kr) {
+        changed_battery->properties = NULL;
+        goto exit;
+    }
+
+    _unpackBatteryState(changed_battery, changed_battery->properties);    
+exit:
+    return;
+}
+
+// Returns 10.0 - 10.4 style IOPMCopyBatteryInfo dictionary, when possible.
+__private_extern__ CFArrayRef _copyLegacyBatteryInfo(void) 
+{
+    CFArrayRef          battery_info = NULL;
+    IOReturn            ret;
     
     // PMCopyBatteryInfo
-    ret = IOPMCopyBatteryInfo(master_device_port, &battery_info);
+    ret = IOPMCopyBatteryInfo(MACH_PORT_NULL, &battery_info);
     if(ret != kIOReturnSuccess || !battery_info)
     {
         return NULL;
