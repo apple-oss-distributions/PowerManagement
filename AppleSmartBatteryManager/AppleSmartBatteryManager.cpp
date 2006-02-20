@@ -24,14 +24,27 @@
 #include "AppleSmartBatteryManager.h"
 #include "AppleSmartBattery.h"
 
-#define super IOService
 
+// Power states!
+enum {
+    kMyOnPowerState = 1
+};
+
+static IOPMPowerState myTwoStates[2] = {
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0}
+};
+
+
+#define super IOService
 
 OSDefineMetaClassAndStructors(AppleSmartBatteryManager, IOService)
 
 bool AppleSmartBatteryManager::start(IOService *provider)
 {
     bool        ret_bool;
+    IOCommandGate * gate;
+    IOWorkLoop *    wl;
 
     if(!super::start(provider)) {
         return false;
@@ -41,6 +54,18 @@ bool AppleSmartBatteryManager::start(IOService *provider)
     if(!fProvider) {
         return false;
     }
+
+    wl = getWorkLoop();
+    if (!wl) {
+        return false;
+    }
+
+    // Join power management so that we can get a notification early during
+    // wakeup to re-sample our battery data. We don't actually power manage
+    // any devices.
+    PMinit();
+    registerPowerDriver(this, myTwoStates, 2);
+    provider->joinPMtree(this);
         
     fBattery = AppleSmartBattery::smartBattery();
 
@@ -50,21 +75,45 @@ bool AppleSmartBatteryManager::start(IOService *provider)
 
     ret_bool = fBattery->start(this);
     
+    gate = IOCommandGate::commandGate(fBattery);
+    if (!gate) {
+        return false;
+    }
+    wl->addEventSource(gate);
+    fGate = gate;      // enable messages
+
     fBattery->registerService(0);
 
     return true;
 }
 
-IOReturn AppleSmartBatteryManager::performTransaction(IOSMBusTransaction * transaction,
-                IOSMBusTransactionCompletion completion,
-                OSObject * target,
-                void * reference)
+IOReturn AppleSmartBatteryManager::performTransaction(
+    IOSMBusTransaction * transaction,
+    IOSMBusTransactionCompletion completion,
+    OSObject * target,
+    void * reference)
 {
     /* directly pass bus transactions back up to SMBusController */
     return fProvider->performTransaction(transaction,
                 completion,
                 target,
                 reference);
+}
+
+IOReturn AppleSmartBatteryManager::setPowerState(
+    unsigned long which, 
+    IOService *whom)
+{
+    if( (kMyOnPowerState == which) 
+        && fGate )
+    {
+        // We are waking from sleep - kick off a battery read to make sure
+        // our battery concept is in line with reality.
+        fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                           fBattery, &AppleSmartBattery::pollBatteryState),
+                           (void *)1, NULL, NULL, NULL); // kNewBatteryPath = 1
+    }
+    return IOPMAckImplied;
 }
 
 
@@ -74,6 +123,9 @@ IOReturn AppleSmartBatteryManager::message(
     void *argument )
 {
     IOSMBusAlarmMessage     *alarm = (IOSMBusAlarmMessage *)argument;
+    static uint16_t         last_data = 0;
+    uint16_t                changed_bits = 0;
+    uint16_t                data = 0;
 
     /* On SMBus alarms from the System Battery Manager, trigger a new
        poll of battery state.   */
@@ -81,9 +133,32 @@ IOReturn AppleSmartBatteryManager::message(
     if(!alarm) return kIOReturnSuccess;
     
     if( (kIOMessageSMBusAlarm == type) 
-        && (kSMBusManagerAddr == alarm->fromAddress))
+        && (kSMBusManagerAddr == alarm->fromAddress)
+        && fGate)
     {
-        fBattery->pollBatteryState();
+        data = (uint16_t)(alarm->data[0] | (alarm->data[1] << 8));
+        changed_bits = data ^ last_data;
+        last_data = data;
+
+        if(changed_bits & kMPresentBatt_A_Bit)
+        {
+            if(data & kMPresentBatt_A_Bit) {
+                // Battery inserted
+                fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                               fBattery, &AppleSmartBattery::handleBatteryInserted),
+                               NULL, NULL, NULL, NULL);
+            } else {
+                // Battery removed
+                fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                               fBattery, &AppleSmartBattery::handleBatteryRemoved),
+                               NULL, NULL, NULL, NULL);
+            }
+        } else {
+            // Just an alarm; re-read battery state.
+            fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                               fBattery, &AppleSmartBattery::pollBatteryState),
+                               NULL, NULL, NULL, NULL);
+        }
     }
 
     return kIOReturnSuccess;
@@ -99,7 +174,7 @@ void BattLog(char *fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, listp);
     va_end(listp);
 
-    IOLog("%s", buf);
+    kprintf("BattLog: %s", buf);
     
     return;
 #endif

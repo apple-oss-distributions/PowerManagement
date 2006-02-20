@@ -39,6 +39,7 @@ struct IOPMBattery {
     int                     location;
     int                     hwReportedTR;
     int                     swCalculatedTR;
+    int                     invalidWakeSecs;
 };
 typedef struct IOPMBattery IOPMBattery;
 
@@ -59,6 +60,9 @@ __private_extern__ CFUserNotificationRef _showUPSWarning(void);
 __private_extern__ IOReturn _setRootDomainProperty(
                                     CFStringRef     key,
                                     CFTypeRef       val);
+
+
+__private_extern__ void _oneOffHacksSetup(void);
 
 #endif
 

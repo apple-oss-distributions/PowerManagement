@@ -201,6 +201,9 @@ void load(CFBundleRef bundle, Boolean bundleVerbose)
                             kCFRunLoopDefaultMode);
     }
 
+    // And we'll try to keep all the ugliest hacks off in their own little corner...
+    _oneOffHacksSetup();
+
     return;
 }
 

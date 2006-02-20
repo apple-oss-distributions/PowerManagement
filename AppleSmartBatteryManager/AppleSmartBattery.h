@@ -43,6 +43,7 @@ protected:
     bool                        fCancelPolling;
     bool                        fPollingNow;
     IOSMBusTransaction          fTransaction;
+    int                         fMachinePath;
 
     // Accessor for MaxError reading
     // Percent error in MaxCapacity reading
@@ -76,9 +77,17 @@ public:
 
     virtual bool start(IOService *provider);
 
-    bool    pollBatteryState(void);
+    bool    pollBatteryState(int path = 0);
+
+    IOReturn setPowerState(unsigned long which, IOService *whom);
+
+    void    handleBatteryInserted(void);
+    
+    void    handleBatteryRemoved(void);
 
 private:
+
+    void    clearBatteryState(bool do_update);
 
     void    timedOut(void);
 
@@ -86,9 +95,9 @@ private:
 
     bool    transactionCompletion(void *ref, IOSMBusTransaction *transaction);
 
-    IOReturn AppleSmartBattery::readWordAsync(
-                        uint8_t address,
-                        uint8_t cmd);
+    IOReturn readWordAsync(uint8_t address, uint8_t cmd);
+
+    IOReturn readBlockAsync(uint8_t address, uint8_t cmd);
 };
 
 #endif

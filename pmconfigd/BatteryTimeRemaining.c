@@ -37,6 +37,7 @@
 #include <syslog.h>
 
 #include "BatteryTimeRemaining.h"
+#include "PrivateLib.h"
 
 /**** PMBattery configd plugin
   We clean up, massage, and re-package the data from the batteries and publish
@@ -67,14 +68,16 @@ enum {
 // static global variables for tracking battery state
 static int              _batCount;
 static int              _impendingSleep = 0;
+static CFAbsoluteTime   _lastWake = 0.0;
 static CFStringRef      *_batName;
 static CFStringRef      *batteryDynamicStore;
 
-    
+
 // forward declarations
 static void     _initializeBatteryCalculations(void);
 static int      _calculateTRWithCurrent(void);
 static void     _packageBatteryInfo(int, CFDictionaryRef *);
+static void     _timeRemainingMaybeValid(CFRunLoopTimerRef timer, void *info);
 
 
 __private_extern__ void
@@ -84,16 +87,53 @@ BatteryTimeRemaining_prime(void)
     _initializeBatteryCalculations();
     return;
 }
- 
+
 __private_extern__ void
 BatteryTimeRemainingSleepWakeNotification(natural_t messageType)
 {
+    CFRunLoopTimerRef               timer_rls = NULL;
+    CFAbsoluteTime                  fire_date;
+    IOPMBattery                   **b;
+    
     switch ( messageType ) {
+
     case kIOMessageSystemWillSleep:
         // System is going to sleep - reset time remaining calculations.
         // Battery drain during sleep will produce an unrealistic time remaining
         // expectation on wake from sleep unless we reset the average sample.
         _impendingSleep = 1;
+
+        break;
+
+    case kIOMessageSystemWillPowerOn:
+
+        b = _batteries();
+        if(b && b[0]) {
+
+            // [4422606] Delay for 1 second before grabbing wakeup time; on an
+            // MP system our code may be running before the clock resync code
+            // has had a chance to finish on the other processor. We  wait
+            // and get a correct read before we call CFAbsoluteTimeGetCurrent()
+            sleep(1);
+    
+            // Start invalid data timer; when it fires we assume battery data
+            // has had time to re-adjust after wake from sleep, and is now valid
+    
+            // In the meantime, any attempt to publish time remaining in 
+            // BatteriesHaveChanged will check the current time against
+            // _lastWake + b[i]->invalidWakeSecs
+    
+            _lastWake = CFAbsoluteTimeGetCurrent();
+        
+            fire_date = _lastWake + (double)b[0]->invalidWakeSecs;
+        
+            timer_rls = CFRunLoopTimerCreate(
+                            NULL, fire_date, 0.0, 
+                            0, 0, _timeRemainingMaybeValid, NULL);
+            CFRunLoopAddTimer( CFRunLoopGetCurrent(), timer_rls, 
+                            kCFRunLoopDefaultMode);
+            CFRelease(timer_rls);
+        }
         break;
         
     case kIOMessageSystemHasPoweredOn:
@@ -102,6 +142,12 @@ BatteryTimeRemainingSleepWakeNotification(natural_t messageType)
     }
 }
 
+static void _timeRemainingMaybeValid(CFRunLoopTimerRef timer, void *info)
+{
+    // Trigger battery time remaining re-calculation now that current reading
+    // is valid.
+    BatteryTimeRemainingBatteriesHaveChanged(NULL);
+}
 
 static void     _initializeBatteryCalculations(void)
 {
@@ -150,9 +196,9 @@ BatteryTimeRemainingBatteriesHaveChanged(IOPMBattery **battery_info)
     static SCDynamicStoreRef    store = NULL;
     static CFDictionaryRef      *old_battery;
 
-    if(!battery_info) return;
-
     _batCount = _batteryCount();
+    
+    if(!battery_info) battery_info = _batteries();
 
     if ( NULL == old_battery ) {
         old_battery = (CFDictionaryRef *) calloc(1, _batCount * sizeof(CFDictionaryRef));
@@ -173,11 +219,14 @@ BatteryTimeRemainingBatteriesHaveChanged(IOPMBattery **battery_info)
     // Calculate time remaining using current
     calculation_return = _calculateTRWithCurrent();
     
-    if(kNoTimeEstimate == calculation_return)
+    if( (kNoTimeEstimate == calculation_return)    
+       || ( battery_info && (_batCount > 0) &&
+          ( (CFAbsoluteTimeGetCurrent() - _lastWake)    // too soon since last
+           < (double)battery_info[0]->invalidWakeSecs) ) )   // wakeup?
     {
         invalid_time_remaining = 1;
     }
-
+    
     // At this point our algorithm above has populated the time remaining estimate
     // We'll package that info into user-consumable dictionaries below.
 
@@ -204,6 +253,7 @@ BatteryTimeRemainingBatteriesHaveChanged(IOPMBattery **battery_info)
             old_battery[i] = result[i];
         }
     }
+    
     if(result) free(result);
 }
 
@@ -288,7 +338,7 @@ void _packageBatteryInfo(int stillCalc, CFDictionaryRef *ret)
                         CFSTR(kIOPSPowerSourceStateKey), 
                         (b->externalConnected ? CFSTR(kIOPSACPowerValue):
                                                 CFSTR(kIOPSBatteryPowerValue)));
-                    
+                                                
         // round charge and capacity down to a % scale
         if(0 != b->maxCap)
         {
