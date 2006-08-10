@@ -44,11 +44,14 @@ public:
 				    OSObject * target = 0,
 				    void * reference = 0);
 
+    IOReturn setPowerState(unsigned long which, IOService *whom);
+
     IOReturn message(UInt32 type, IOService *provider, void * argument);
 
 private:
-    IOSMBusController           *fProvider;
-    AppleSmartBattery           *fBattery;
+    IOCommandGate               * fGate;
+    IOSMBusController           * fProvider;
+    AppleSmartBattery           * fBattery;
 };
 
 #endif

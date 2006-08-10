@@ -428,9 +428,6 @@ exit:
     if(this_task) CFRelease(this_task);
     if(assertions) CFRelease(assertions);
     if(cf_port_for_task) CFRelease(cf_port_for_task);
-    if((profile != NULL) && (profileCnt > 0)) {
-        vm_deallocate(mach_task_self(), (vm_address_t)profile, profileCnt);
-    }
 
     return KERN_SUCCESS;
 }

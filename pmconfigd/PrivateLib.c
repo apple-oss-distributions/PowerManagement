@@ -35,6 +35,17 @@ enum
     PowerMangerScheduledSleep
 };
 
+/* If the battery doesn't specify an alternative time, we wait 16 seconds
+   of ignoring the battery's (or our own) time remaining estimate. We choose
+   the number 16 seconds because PMU based PPC machines have a 15 second
+   battery polling cycle, and this 16 second timer should guarantee a 
+   valid time remaining estimate on PPC.
+*/   
+enum
+{
+    kInvalidWakeSecsDefault = 16
+};
+
 #define kPowerManagerActionNotificationName "com.apple.powermanager.action"
 #define kPowerManagerActionKey "action"
 #define kPowerManagerValueKey "value"
@@ -210,6 +221,12 @@ static void _unpackBatteryState(IOPMBattery *b, CFDictionaryRef prop)
     if(n) {
         CFNumberGetValue(n, kCFNumberIntType, &b->location);
     }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMBatteryInvalidWakeSecondsKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->invalidWakeSecs);
+    } else {
+        b->invalidWakeSecs = kInvalidWakeSecsDefault;
+    }
 
     return;
 }
@@ -222,10 +239,28 @@ __private_extern__ int  _batteryCount(void)
 __private_extern__ IOPMBattery *_newBatteryFound(io_registry_entry_t where)
 {
     int             new_battery_index = batCount++;
+    IOPMBattery     **new_batteries_holder = NULL;
     IOPMBattery     *new_battery = NULL;
+    int             i;
+    
+    new_batteries_holder = (IOPMBattery **)malloc( 
+                                batCount * sizeof(IOPMBattery *) );
 
-    batteries = (IOPMBattery **)realloc(batteries, 
-                                    batCount*sizeof(IOPMBattery *));
+    if( batteries && (batCount > 1) )
+    {
+        // Copy existing batteries into new array
+        for(i=0; i<new_battery_index; i++)
+        {
+            new_batteries_holder[i] = batteries[i];
+        }
+
+        // Free older, smaller array
+        free(batteries); batteries = NULL;
+    }
+
+    batteries = new_batteries_holder;
+
+    // Populate new battery in array
     new_battery = calloc(1, sizeof(IOPMBattery));
     batteries[new_battery_index] = new_battery;
     
@@ -323,58 +358,85 @@ __private_extern__ CFUserNotificationRef _showUPSWarning(void)
     return note_ref;
 #endif // STANDALONE    
 }
-/*
-__private_extern__ CFUserNotificationRef _showLowBatteryWarning(void)
+
+/************************* One off hack for AppleSMC
+ *************************
+ ************************* Send AppleSMC a kCFPropertyTrue
+ ************************* on time discontinuities.
+ *************************/
+
+static CFMachPortRef        calChangeReceivePort = NULL;
+
+static void setSMCProperty(void)
 {
+    static io_registry_entry_t     _smc = MACH_PORT_NULL;
+    IOReturn                ret;
 
-// _showLowBatteryWarning is a no-op until
-// we resolve the TalkingAlerts issue. Need this to generate a speakable alert,
-// but the plumbing involved in doing that from configd is complicated.
-// For the time being, BatteryMonitor will continue to issue this alert.
-    CFMutableDictionaryRef      alert_dict;
-    SInt32                      error;
-    CFUserNotificationRef       note_ref;
-    CFBundleRef                 myBundle;
-    CFURLRef                    low_batt_image_URL;    
-    CFURLRef                    bundle_url;
-    CFStringRef                 header_unlocalized;
-    CFStringRef                 message_unlocalized;
-    
-    myBundle = CFBundleGetBundleWithIdentifier(CFSTR("com.apple.SystemConfiguration.PowerManagement"));
-    
-    // Create alert dictionary
-    alert_dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, 
-        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    if(!alert_dict) return NULL;
-    
-    bundle_url = CFBundleCopyBundleURL(myBundle);
-    CFDictionarySetValue(alert_dict, kCFUserNotificationLocalizationURLKey, bundle_url);
-    CFRelease(bundle_url);
-
-    
-    low_batt_image_URL = CFBundleCopyResourceURL(myBundle, CFSTR("low-batt"), CFSTR("icns"), 0);
-    if(low_batt_image_URL) 
-    {
-        CFShow(low_batt_image_URL);
-        CFDictionaryAddValue(alert_dict, kCFUserNotificationIconURLKey, low_batt_image_URL);
-        CFRelease(low_batt_image_URL);
+    if(MACH_PORT_NULL == _smc) {
+        _smc = IOServiceGetMatchingService( MACH_PORT_NULL,
+                        IOServiceMatching("AppleSMCFamily"));
     }
     
-    header_unlocalized = CFSTR("YOU ARE NOW RUNNING ON RESERVE BATTERY POWER.");
-    message_unlocalized = CFSTR("PLEASE CONNECT YOUR COMPUTER TO AC POWER. IF YOU DO NOT, YOUR COMPUTER WILL GO TO SLEEP IN A FEW MINUTES TO PRESERVE THE CONTENTS OF MEMORY.");
-    
-    CFDictionaryAddValue(alert_dict, kCFUserNotificationAlertHeaderKey, header_unlocalized);
-    CFDictionaryAddValue(alert_dict, kCFUserNotificationAlertMessageKey, message_unlocalized);
-    
-    note_ref = CFUserNotificationCreate(kCFAllocatorDefault, 0, 0, &error, alert_dict);
-    CFRelease(alert_dict);
-    if(0 != error)
-    {
-        syslog(LOG_INFO, "PowerManagement: battery warning error = %d\n", error);
-        return NULL;    
+    if(!_smc) {
+        return;
     }
-
-    return note_ref;
-
+    
+    // And simply AppleSMC with kCFBooleanTrue to let them know time is changed.
+    // We don't pass any information down.
+    ret = IORegistryEntrySetCFProperty( _smc, 
+                        CFSTR("TheTimesAreAChangin"), 
+                        kCFBooleanTrue);
 }
-*/
+
+static void handleMachCalendarMessage(CFMachPortRef port, void *msg, 
+                                            CFIndex size, void *info)
+{
+	kern_return_t  result;
+    mach_port_t    mport = CFMachPortGetPort(port); 
+	
+	// Re-register for notification
+	result = host_request_notification(mach_host_self(), HOST_NOTIFY_CALENDAR_CHANGE, mport);
+	if (result != KERN_SUCCESS) {
+        // Pretty fatal error. Oh well.
+        return;
+	}
+
+    setSMCProperty();
+}
+
+
+static void registerForCalendarChangedNotification(void)
+{
+	mach_port_t tport;
+	kern_return_t result;
+	CFRunLoopSourceRef rls;
+
+	// allocate the mach port we'll be listening to
+	result = mach_port_allocate(mach_task_self(),MACH_PORT_RIGHT_RECEIVE, &tport);
+	if (result != KERN_SUCCESS) {
+        return;
+    }
+
+    calChangeReceivePort = CFMachPortCreateWithPort(
+            kCFAllocatorDefault,
+            tport,
+            (CFMachPortCallBack)handleMachCalendarMessage,
+            NULL, /* context */
+            false); /* shouldFreeInfo */
+
+    rls = CFMachPortCreateRunLoopSource(
+            kCFAllocatorDefault, 
+            calChangeReceivePort,
+            0); /* index Order */
+
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, kCFRunLoopDefaultMode);
+
+	// register for notification
+	result = host_request_notification(mach_host_self(),HOST_NOTIFY_CALENDAR_CHANGE, tport);
+}
+
+
+void _oneOffHacksSetup(void) 
+{
+    registerForCalendarChangedNotification();
+}

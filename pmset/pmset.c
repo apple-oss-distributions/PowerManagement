@@ -265,7 +265,7 @@ static int parseArgs(
 static void usage(void)
 {
     printf("Usage:  pmset [-b | -c | -u | -a] <action> <minutes> [<action> <minutes>...]\n");
-    printf("        pmset -g [disk | cap | live | sched | ups | batt\n");
+    printf("        pmset -g [disk | cap | live | sched | ups | batt]\n");
     printf("           -c adjust settings used while connected to a charger\n");
     printf("           -b adjust settings used when running off a battery\n");
     printf("           -u adjust settings used while running off a UPS\n");
@@ -975,7 +975,7 @@ static void show_power_sources(int which)
     }
     if(!last_ps || kCFCompareEqualTo != CFStringCompare(last_ps, ps_name, 0))
     {
-        printf("Currenty drawing from '%s'\n", strbuf);
+        printf("Currently drawing from '%s'\n", strbuf);
     }
     if(last_ps) CFRelease(last_ps);
     last_ps = CFStringCreateCopy(kCFAllocatorDefault, ps_name);
@@ -1293,8 +1293,6 @@ static int log_raw_power_source_changes(void)
     // should never return from CFRunLoopRun
     return 0;
 }
-
-
 
 /******************************************************************************/
 /*                                                                            */

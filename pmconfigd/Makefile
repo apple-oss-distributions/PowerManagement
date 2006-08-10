@@ -9,7 +9,7 @@ MIG_PRODUCTS = powermanagement.h powermanagementServer.c powermanagementServer.h
 PROJ_ROOT = ..
 UPS_DIR = $(PROJ_ROOT)/ioupsd
 
-CFLAGS = -g -DSTANDALONE
+CFLAGS = -g -DSTANDALONE -Wall
 FRAMEWORKS = -framework IOKit -framework CoreFoundation -framework SystemConfiguration
 
 all: pmconfigd
