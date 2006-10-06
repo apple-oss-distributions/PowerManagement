@@ -26,6 +26,9 @@
 #include <IOKit/IOReturn.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #include <IOKit/pwr_mgt/IOPM.h>
+#include <unistd.h>
+#include <grp.h>
+#include <pwd.h>
 #include <syslog.h>
 #include "PrivateLib.h"
 
@@ -205,6 +208,10 @@ static void _unpackBatteryState(IOPMBattery *b, CFDictionaryRef prop)
     if(n) {
         CFNumberGetValue(n, kCFNumberIntType, &b->maxCap);
     }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSDesignCapacityKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->designCap);
+    }
     n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSTimeRemainingKey));
     if(n) {
         CFNumberGetValue(n, kCFNumberIntType, &b->hwReportedTR);
@@ -212,6 +219,10 @@ static void _unpackBatteryState(IOPMBattery *b, CFDictionaryRef prop)
     n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSAmperageKey));
     if(n) {
         CFNumberGetValue(n, kCFNumberIntType, &b->amperage);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSMaxErrKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->maxerr);
     }
     n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSCycleCountKey));
     if(n) {
@@ -221,11 +232,19 @@ static void _unpackBatteryState(IOPMBattery *b, CFDictionaryRef prop)
     if(n) {
         CFNumberGetValue(n, kCFNumberIntType, &b->location);
     }
-    n = CFDictionaryGetValue(prop, CFSTR(kIOPMBatteryInvalidWakeSecondsKey));
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSInvalidWakeSecondsKey));
     if(n) {
         CFNumberGetValue(n, kCFNumberIntType, &b->invalidWakeSecs);
     } else {
         b->invalidWakeSecs = kInvalidWakeSecsDefault;
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSBatteryHealthKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->health);
+    }
+    n = CFDictionaryGetValue(prop, CFSTR(kIOPMPSHealthConfidenceKey));
+    if(n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->healthConfidence);
     }
 
     return;
@@ -303,6 +322,16 @@ exit:
     return;
 }
 
+__private_extern__ bool _batteryHas(IOPMBattery *b, CFStringRef property)
+{
+    if(!property || !b->properties) return false;
+    
+    // If the battery's descriptior dictionary has an entry at all for the
+    // given 'property' it is supported, i.e. the battery 'has' it.
+    return CFDictionaryGetValue(b->properties, property) ? true : false;
+}
+
+
 // Returns 10.0 - 10.4 style IOPMCopyBatteryInfo dictionary, when possible.
 __private_extern__ CFArrayRef _copyLegacyBatteryInfo(void) 
 {
@@ -356,7 +385,9 @@ __private_extern__ CFUserNotificationRef _showUPSWarning(void)
     }
 
     return note_ref;
-#endif // STANDALONE    
+#else 
+    return NULL;
+#endif
 }
 
 /************************* One off hack for AppleSMC
@@ -433,6 +464,69 @@ static void registerForCalendarChangedNotification(void)
 
 	// register for notification
 	result = host_request_notification(mach_host_self(),HOST_NOTIFY_CALENDAR_CHANGE, tport);
+}
+
+
+__private_extern__ int
+callerIsRoot(
+    int uid,
+    int gid
+)
+{
+    return (0 == uid);
+}
+
+__private_extern__ int
+callerIsAdmin(
+    int uid,
+    int gid
+)
+{
+    int         ngroups = NGROUPS_MAX+1;
+    int         group_list[NGROUPS_MAX+1];
+    int         i;
+    struct group    *adminGroup;
+    struct passwd   *pw;
+        
+    
+    pw = getpwuid(uid);
+    if(!pw) return false;
+    
+    getgrouplist(pw->pw_name, pw->pw_gid, group_list, &ngroups);
+
+    adminGroup = getgrnam("admin");
+    if (adminGroup != NULL) {
+        gid_t    adminGid = adminGroup->gr_gid;
+        for(i=0; i<ngroups; i++)
+        {
+            if (group_list[i] == adminGid) {
+                return TRUE;    // if a member of group "admin"
+            }
+        }
+    }
+    return false;
+}
+
+__private_extern__ int
+callerIsConsole(
+    int uid,
+    int gid)
+{
+    CFStringRef                 user_name = NULL;
+    uid_t                       console_uid;
+    gid_t                       console_gid;
+    
+    user_name = (CFStringRef)SCDynamicStoreCopyConsoleUser(NULL, 
+                                    &console_uid, &console_gid);
+
+    if(user_name) {
+        CFRelease(user_name);
+        return ((uid == console_uid) && (gid == console_gid));
+    } else {
+        // no data returned re: console user's uid or gid; return "false"
+        return false;
+    }
+    
 }
 
 

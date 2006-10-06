@@ -36,26 +36,37 @@ enum {
     kNewBatteryPath = 1
 };
 
-// The interval at which, when charging or discharging the battery, we poll
-// for updates in the absence of any alarms or alerts.
-// In milliseconds.
-enum {
-    kPollingInterval = 30000
-};
-
 // Three retry attempts on SMBus command failure
 enum { 
     kRetryAttempts = 5
 };
 
 enum {
-    kSecondsUntilValidOnWake = 30
+    kSecondsUntilValidOnWake    = 30,
+    kPostChargeWaitSeconds      = 120,
+    kPostDischargeWaitSeconds   = 120
 };
+
+
+enum {
+    kDefaultPollInterval = 0,
+    kQuickPollInterval = 1
+};
+
+// Polling intervals
+// The battery kext switches between polling frequencies depending on
+// battery load
+static uint32_t milliSecPollingTable[2] =
+    { 
+      30000,    // 0 == Regular 30 second polling
+      1000      // 1 == Quick 1 second polling
+    };
+
 
 // Delays to use on subsequent SMBus re-read failures.
 // In microseconds.
 static const uint32_t microSecDelayTable[kRetryAttempts] = 
-                { 10, 100, 1000, 10000, 250000 };
+    { 10, 100, 1000, 10000, 250000 };
                 
                 
 #define STATUS_ERROR_NEEDS_RETRY(err)                           \
@@ -66,18 +77,22 @@ static const uint32_t microSecDelayTable[kRetryAttempts] =
    || (kIOSMBusStatusTimeout == err)                            \
    || (kIOSMBusStatusBusy == err) )
 
-#ifndef kIOBatteryCycleCountKey
-#define kIOBatteryCycleCountKey     "Cycle Count"
-#endif
 
 // Keys we use to publish battery state in our IOPMPowerSource::properties array
-static const OSSymbol *_MaxErrSym = OSSymbol::withCString("MaxErr");
-static const OSSymbol *_DeviceNameSym = OSSymbol::withCString("DeviceName");
-static const OSSymbol *_FullyChargedSym = OSSymbol::withCString("FullyCharged");
-static const OSSymbol *_AvgTimeToEmptySym = OSSymbol::withCString("AvgTimeToEmpty");
-static const OSSymbol *_AvgTimeToFullSym = OSSymbol::withCString("AvgTimeToFull");
-static const OSSymbol *_ManfDateSym = OSSymbol::withCString("ManufactureDate");
-static const OSSymbol *_DesignCapacitySym = OSSymbol::withCString("DesignCapacity");
+static const OSSymbol *_MaxErrSym = 
+                        OSSymbol::withCString(kIOPMPSMaxErrKey);
+static const OSSymbol *_DeviceNameSym = 
+                        OSSymbol::withCString(kIOPMDeviceNameKey);
+static const OSSymbol *_FullyChargedSym = 
+                        OSSymbol::withCString(kIOPMFullyChargedKey);
+static const OSSymbol *_AvgTimeToEmptySym = 
+                        OSSymbol::withCString("AvgTimeToEmpty");
+static const OSSymbol *_AvgTimeToFullSym = 
+                        OSSymbol::withCString("AvgTimeToFull");
+static const OSSymbol *_ManfDateSym = 
+                        OSSymbol::withCString(kIOPMPSManufactureDateKey);
+static const OSSymbol *_DesignCapacitySym = 
+                        OSSymbol::withCString(kIOPMPSDesignCapacityKey);
 
 #define super IOPMPowerSource
 OSDefineMetaClassAndStructors(AppleSmartBattery,IOPMPowerSource)
@@ -137,9 +152,12 @@ bool AppleSmartBattery::start(IOService *provider)
     if(!fProvider || !super::start(provider)) {
         return false;
     }
-    
+
+    fPollingInterval = kDefaultPollInterval;
     fPollingNow = false;
     fCancelPolling = false;
+
+    fInflowDisabled = false;
     
     fWorkLoop = getWorkLoop();
     
@@ -155,9 +173,18 @@ bool AppleSmartBattery::start(IOService *provider)
     
     // Publish the intended period in seconds that our "time remaining"
     // estimate is wildly inaccurate after wake from sleep.
-    setProperty( kIOPMBatteryInvalidWakeSecondsKey, 
+    setProperty( kIOPMPSInvalidWakeSecondsKey, 
                  kSecondsUntilValidOnWake, 32);
+
+    // Publish the necessary time period (in seconds) that a battery
+    // calibrating tool must wait to allow the battery to settle after
+    // charge and after discharge.
+    setProperty( kIOPMPSPostChargeWaitSecondsKey, 
+                 kPostChargeWaitSeconds, 32);
+    setProperty( kIOPMPSPostDishargeWaitSecondsKey, 
+                 kPostDischargeWaitSeconds, 32);
     
+
     // **** Should occur on workloop
     // zero out battery state with argument (do_update == true)
     clearBatteryState(false);
@@ -172,6 +199,17 @@ bool AppleSmartBattery::start(IOService *provider)
 
 
 /******************************************************************************
+ * AppleSmartBattery::setPollingInterval
+ *
+ ******************************************************************************/
+void AppleSmartBattery::setPollingInterval(
+    int milliSeconds)
+{
+    milliSecPollingTable[kDefaultPollInterval] = milliSeconds;
+    fPollingInterval = kDefaultPollInterval;
+}
+
+/******************************************************************************
  * AppleSmartBattery::pollBatteryState
  *
  * Asynchronously kicks off the register poll.
@@ -179,7 +217,6 @@ bool AppleSmartBattery::start(IOService *provider)
 
 bool AppleSmartBattery::pollBatteryState(int path)
 {
-
     // This must be called under workloop synchronization
     fMachinePath = path;
 
@@ -191,13 +228,34 @@ void AppleSmartBattery::handleBatteryInserted(void)
 {
     // This must be called under workloop synchronization
     pollBatteryState( kNewBatteryPath );
+
+    return;
 }
 
 void AppleSmartBattery::handleBatteryRemoved(void)
 {
     // This must be called under workloop synchronization
     clearBatteryState(true);
+
+    return;
 }
+
+void AppleSmartBattery::handleInflowDisabled(bool inflow_state)
+{
+    fInflowDisabled = inflow_state;
+    // And kick off a re-poll using this new information
+    pollBatteryState(kExistingBatteryPath);
+
+    return;
+}
+
+void AppleSmartBattery::handleChargeInhibited(bool charge_state)
+{
+    fChargeInhibited = charge_state;
+    // And kick off a re-poll using this new information
+    pollBatteryState(kExistingBatteryPath);
+}
+
 
 /******************************************************************************
  * AppleSmartBattery::transactionCompletion
@@ -221,6 +279,7 @@ bool AppleSmartBattery::transactionCompletion(
 
     static int retry_attempts = 0;
 
+    static bool fully_discharged = false;
     static bool fully_charged = false;
     static bool batt_present = true;
     static int  ac_connected = -1;
@@ -314,7 +373,18 @@ bool AppleSmartBattery::transactionCompletion(
 
                 my_unsigned_16 = (transaction->receiveData[1] << 8)
                                 | transaction->receiveData[0];
-                new_ac_connected = (my_unsigned_16 & kMACPresentBit) ? 1:0;
+
+                // If fInflowDisabled is currently set, then we acknowledge 
+                // our lack of AC power.
+                //
+                // inflow disable means the system is not drawing power from AC.
+                //
+                // Even with inflow disabled, the AC bit is still true if AC
+                // is attached. We zero the bit instead, so that it looks
+                // more accurate in BatteryMonitor.
+                
+                new_ac_connected = ( !fInflowDisabled 
+                                && (my_unsigned_16 & kMACPresentBit) ) ? 1:0;
 
 
                 // Tell IOPMrootDomain on ac connect/disconnect
@@ -353,11 +423,22 @@ bool AppleSmartBattery::transactionCompletion(
                 my_unsigned_16 = (transaction->receiveData[1] << 8)
                                 | transaction->receiveData[0];
                                 
-                batt_present = (my_unsigned_16 & kMPresentBatt_A_Bit) ? true:false;
+                batt_present = (my_unsigned_16 & kMPresentBatt_A_Bit) 
+                                ? true : false;
 
                 setBatteryInstalled(batt_present);
 
-                setIsCharging((my_unsigned_16 & kMChargingBatt_A_Bit) ? true:false);    
+                // If fChargeInhibit is currently set, then we acknowledge 
+                // our lack of charging and force the "isCharging" bit to false.
+                //
+                // charge inhibit means the battery will not charge, even if
+                // AC is attached.
+                // Without marking this lack of charging here, it can take
+                // up to 30 seconds for the charge disable to be reflected in
+                // the UI.
+
+                setIsCharging( !fChargeInhibited
+                    &&  (my_unsigned_16 & kMChargingBatt_A_Bit) ? true:false);    
             } else {
                 batt_present = false;
                 setBatteryInstalled(false);
@@ -398,7 +479,7 @@ bool AppleSmartBattery::transactionCompletion(
                 */
                 readWordAsync(kSMBusBatteryAddr, kBRemainingCapacityCmd);
             }
-
+            
             break;
 
 /************ Only executed in ReadForNewBatteryPath ****************/
@@ -425,6 +506,7 @@ bool AppleSmartBattery::transactionCompletion(
             
             readWordAsync(kSMBusBatteryAddr, kBManufactureDateCmd);
         break;
+
 
 /************ Only executed in ReadForNewBatteryPath ****************/
         case kBManufactureDateCmd:
@@ -461,6 +543,7 @@ bool AppleSmartBattery::transactionCompletion(
             } else {
                 properties->removeObject(_DeviceNameSym);
             }
+
 
             readWordAsync(kSMBusBatteryAddr, kBSerialNumberCmd);
             
@@ -521,6 +604,9 @@ bool AppleSmartBattery::transactionCompletion(
             {
                 my_unsigned_16 = (transaction->receiveData[1] << 8)
                                 | transaction->receiveData[0];
+                                
+                fRemainingCapacity = my_unsigned_16;
+                
                 setCurrentCapacity( (unsigned int)my_unsigned_16 );
             } else {
                 setCurrentCapacity(0);
@@ -536,7 +622,28 @@ bool AppleSmartBattery::transactionCompletion(
             {
                 my_unsigned_16 = (transaction->receiveData[1] << 8)
                                 | transaction->receiveData[0];
+
+                fFullChargeCapacity = my_unsigned_16;
+
                 setMaxCapacity( my_unsigned_16 );
+
+                if( fFullChargeCapacity )
+                {
+                    /*
+                     * Conditionally set polling interval to 1 second if we're
+                     *     discharging && below 5% && on AC power
+                     * i.e. we're doing an Inflow Disabled discharge
+                     */
+                    if( (((100*fRemainingCapacity) / fFullChargeCapacity ) < 5) 
+                        && ac_connected )
+                    {
+                        setProperty("Quick Poll", true);
+                        fPollingInterval = kQuickPollInterval;
+                    } else {
+                        setProperty("Quick Poll", false);
+                        fPollingInterval = kDefaultPollInterval;
+                    }
+                }
             } else {
                 setMaxCapacity(0);
             }
@@ -595,6 +702,19 @@ bool AppleSmartBattery::transactionCompletion(
                 } else {
                     fully_charged = false;
                 }
+                
+                if ( my_unsigned_16 & kBFullyDischargedStatusBit)
+                {
+                    if(!fully_discharged) {
+                        fully_discharged = true;
+    
+                        // Immediately cancel AC Inflow disable
+                        fProvider->handleFullDischarge();
+                    }
+                } else {
+                    fully_discharged = false;
+                }
+                
             } else {
                 fully_charged = false;
             }
@@ -706,13 +826,14 @@ bool AppleSmartBattery::transactionCompletion(
             // not fully charged. No need to poll when fully charged.
             if(  ( !ac_connected )
               || ( !fully_charged && batt_present ) ) {
-                fPollTimer->setTimeoutMS(kPollingInterval);
-                BattLog("SmartBattery: new timeout scheduled in 30 seconds\n");
+                fPollTimer->setTimeoutMS( milliSecPollingTable[fPollingInterval] );
+                BattLog("SmartBattery: new timeout scheduled in %d msec\n",
+                                fPollingInterval);
             } else {
                 // We'll let the polling timer expire.
                 // Right now we're plugged into AC, we'll start the timer again
                 // when we get an alarm on AC unplug.
-                BattLog("SmartBattery: battery is fully charged; letting timeout expire.\n");
+                BattLog("SmartBattery: letting timeout expire.\n");
             }
 
             break;

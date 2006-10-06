@@ -44,6 +44,11 @@ protected:
     bool                        fPollingNow;
     IOSMBusTransaction          fTransaction;
     int                         fMachinePath;
+    uint32_t                    fPollingInterval;
+    bool                        fInflowDisabled;
+    bool                        fChargeInhibited;
+    uint16_t                    fRemainingCapacity;
+    uint16_t                    fFullChargeCapacity;
 
     // Accessor for MaxError reading
     // Percent error in MaxCapacity reading
@@ -77,6 +82,8 @@ public:
 
     virtual bool start(IOService *provider);
 
+    void    setPollingInterval(int milliSeconds);
+
     bool    pollBatteryState(int path = 0);
 
     IOReturn setPowerState(unsigned long which, IOService *whom);
@@ -84,6 +91,10 @@ public:
     void    handleBatteryInserted(void);
     
     void    handleBatteryRemoved(void);
+
+    void    handleInflowDisabled(bool inflow_state);
+
+    void    handleChargeInhibited(bool charge_state);
 
 private:
 

@@ -63,8 +63,10 @@ enum {
     kNothingToSeeHere = 0,
     kNoTimeEstimate,
 };
-    
-    
+
+// Battery health calculation constants
+#define kSmartBattReserve_mAh    200.0
+
 // static global variables for tracking battery state
 static int              _batCount;
 static int              _impendingSleep = 0;
@@ -304,6 +306,138 @@ int _calculateTRWithCurrent(void)
 }
 
 
+// Set health & confidence
+void _setBatteryHealthConfidence(
+    CFMutableDictionaryRef  outDict, 
+    IOPMBattery             *b)
+{
+    if(!outDict || !b) return;
+
+    // no battery present? no health & confidence then!
+    // If we return without setting the health and confidence values in
+    // outDict, that is OK, it just means they were indeterminate.
+    if( !b->isPresent ) return;
+
+    if( _batteryHas(b, CFSTR(kIOPMPSHealthConfidenceKey)) 
+        && _batteryHas(b, CFSTR(kIOPMPSBatteryHealthKey)) )
+    {
+        // Has the battery driver specified health and confidence for us? 
+        // If so, lets use those driver-provided integer
+        // values and call it a day.
+
+        /* HEALTH */
+        if( kIOPMPoorValue == b->health )
+            CFDictionarySetValue(outDict, 
+                        CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSPoorValue));
+        else if( kIOPMFairValue == b->health )
+            CFDictionarySetValue(outDict, 
+                        CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSFairValue));
+        else if( kIOPMGoodValue == b->health )
+            CFDictionarySetValue(outDict, 
+                        CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSGoodValue));
+
+        /* CONFIDENCE */
+        if( kIOPMPoorValue == b->healthConfidence )
+            CFDictionarySetValue(outDict, 
+                        CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSPoorValue));
+        else if( kIOPMFairValue == b->healthConfidence )
+            CFDictionarySetValue(outDict, 
+                        CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSFairValue));
+        else if( kIOPMGoodValue == b->healthConfidence )
+            CFDictionarySetValue(outDict, 
+                        CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSGoodValue));
+
+        return;
+    }
+
+    /* We must fend for ourselves and construct a poor/fair/good
+       estimate of battery health ourselves.
+
+       Our preferred formula says:
+            MaxCap / DesignCap < 65% => Poor Health
+                               < 85% => Fair Health
+                              otherwise Good Health
+            MaxErr < 4 => Good Confidence
+            MaxErr < 6 => Fair Confidence
+                otherwise Poor confidence
+    */
+    if( _batteryHas(b, CFSTR(kIOPMPSMaxCapacityKey))
+     && _batteryHas(b, CFSTR(kIOPMPSDesignCapacityKey))
+     && _batteryHas(b, CFSTR(kIOPMPSMaxErrKey)) )
+    {
+        // Ratio of Full Charge Capacity (plus the battery's backup reserve), 
+        // to the original design capacity determines health.
+        double ratio =  ((double)b->maxCap + kSmartBattReserve_mAh)
+                        /  (double)b->designCap;
+
+        /* HEALTH */
+        if( 0.65 > ratio ) {
+            CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSPoorValue));
+        } else if( 0.85 > ratio ) {
+            CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSFairValue));
+        } else {
+            CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSGoodValue));
+        }
+    
+        /* CONFIDENCE */
+        if( b->maxerr < 4 ) {
+            CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSGoodValue));
+        } else if( b->maxerr < 6 ) {
+            CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSFairValue));
+        } else {
+            CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSPoorValue));
+        }
+        
+        return;
+        
+    } else {
+
+       /*
+           If the battery does not report DesignCap or MaxErr,
+           we'll use cycle count to determine health.
+
+                cyclecount > 350 => Poor health
+                cyclecount > 250 => Fair health
+                          otherwise Good Heath
+
+            Confidence is always set to "fair" for this scenario.
+        */
+
+        if( _batteryHas(b, CFSTR(kIOPMPSCycleCountKey)) )
+        {
+            /* CONFIDENCE */
+            CFDictionarySetValue(outDict, 
+                CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSFairValue));
+
+            /* HEALTH */
+            if( b->cycleCount > 350 ) {
+                CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSPoorValue));
+            } else if( b->cycleCount > 250 ) {
+                CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSFairValue));
+            } else {
+                CFDictionarySetValue(outDict, 
+                    CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSGoodValue));
+            }
+            return;
+        } else {
+            // No cycles, no design cap, no nothing! We can't figure
+            // out a thing about this battery's health!!!
+            // So we leave the health properties unspecified.            
+            return;
+        }
+    }
+
+    return;
+}
+
 /* 
  * Implicit argument: All the global variables that track battery state
  */
@@ -338,7 +472,7 @@ void _packageBatteryInfo(int stillCalc, CFDictionaryRef *ret)
                         CFSTR(kIOPSPowerSourceStateKey), 
                         (b->externalConnected ? CFSTR(kIOPSACPowerValue):
                                                 CFSTR(kIOPSBatteryPowerValue)));
-                                                
+
         // round charge and capacity down to a % scale
         if(0 != b->maxCap)
         {
@@ -429,12 +563,21 @@ void _packageBatteryInfo(int stillCalc, CFDictionaryRef *ret)
                     }
                 }
             }
+            
         }
         CFRelease(n0);
         CFRelease(nneg1);
 
+        // Set health & confidence
+        _setBatteryHealthConfidence(mutDict, b);
+
+
         // Set name
-        CFDictionarySetValue(mutDict, CFSTR(kIOPSNameKey), _batName[i]);
+        if(_batName[i]) {
+            CFDictionarySetValue(mutDict, CFSTR(kIOPSNameKey), _batName[i]);
+        } else {
+            CFDictionarySetValue(mutDict, CFSTR(kIOPSNameKey), CFSTR("Unnamed"));
+        }
         ret[i] = mutDict;
     }
 

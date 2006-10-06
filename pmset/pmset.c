@@ -181,6 +181,13 @@ enum ArgumentType {
     ApplyToUPS     = 4
 };
 
+enum AssertionBitField {
+    kAssertionCPU = 1,
+    kAssertionInflow = 2,
+    kAssertionCharge = 4,
+    kAssertionIdle = 8
+};
+
 typedef struct {
     CFStringRef         who;
     CFDateRef           when;
@@ -199,6 +206,7 @@ static void show_ups_settings(void);
 static void show_active_profiles(void);
 static void show_system_profiles(void);
 static void show_scheduled_events(void);
+static void show_active_assertions(uint32_t which);
 static void show_power_sources(int which);
 static void log_ps_change_handler(void *);
 static int log_power_source_changes(int which);
@@ -452,7 +460,7 @@ static void print_cpu_override_pids(void)
             int                 val = 0;
             
             tmp_dict = CFArrayGetValueAtIndex(assertions[i], j);
-            if(!tmp_dict) {
+            if(!tmp_dict || (kCFBooleanFalse == (CFBooleanRef)tmp_dict)) {
                 continue;
             }
             tmp_type = CFDictionaryGetValue(tmp_dict, kIOPMAssertionTypeKey);
@@ -931,8 +939,124 @@ static void show_scheduled_events(void)
         printf("No scheduled events.\n"); fflush(stdout);
 }
 
+static bool matchingAssertion(CFDictionaryRef asst_dict, CFStringRef asst)
+{
+    if(!asst_dict || (kCFBooleanFalse == (CFTypeRef)asst_dict)) return false;
+
+    return CFEqual(asst, 
+                   CFDictionaryGetValue(asst_dict, kIOPMAssertionTypeKey));
+}
 
 
+static void show_active_assertions(uint32_t which)
+{
+    // Print active DisableInflow or ChargeInhibit assertions on the 
+    // following line
+    CFDictionaryRef         assertions_status = NULL;
+    CFDictionaryRef         assertions_by_pid = NULL;
+    CFStringRef             *assertionNames = NULL;
+    CFNumberRef             *assertionValues = NULL;
+    CFNumberRef             *pids = NULL;
+    CFArrayRef              *pidAssertions = NULL;
+    char                    name[50];
+    int                     val;
+    int                     total_assertion_count;
+    int                     pid_count;
+    IOReturn                ret;
+    int                     i, j, k;
+    
+    if(0 == which) return;
+
+    ret = IOPMCopyAssertionsStatus(&assertions_status);
+    if(kIOReturnSuccess != ret || !assertions_status)
+        return;
+    
+    ret = IOPMCopyAssertionsByProcess(&assertions_by_pid);
+    if(kIOReturnSuccess != ret || !assertions_by_pid)
+        return;
+
+    // Grab out the total/aggregate sate of the assertions
+    total_assertion_count = CFDictionaryGetCount(assertions_status);
+    if(0 == total_assertion_count)
+        return;
+
+    assertionNames = (CFStringRef *)malloc(
+                                sizeof(void *) * total_assertion_count);
+    assertionValues = (CFNumberRef *)malloc(
+                                sizeof(void *) * total_assertion_count);
+    CFDictionaryGetKeysAndValues(assertions_status, 
+                                (const void **)assertionNames, 
+                                (const void **)assertionValues);
+
+    // Grab the list of activated assertions per-process
+    pid_count = CFDictionaryGetCount(assertions_by_pid);
+    if(0 == pid_count)
+        return;
+        
+    pids = malloc(sizeof(CFNumberRef) * pid_count);
+    pidAssertions = malloc(sizeof(CFArrayRef *) * pid_count);
+ 
+    CFDictionaryGetKeysAndValues(assertions_by_pid, 
+                                (const void **)pids, 
+                                (const void **)pidAssertions);
+
+    if( !assertionNames || !assertionValues
+      || !pidAssertions || !pids) 
+    {        
+        return;
+    }
+
+    for(i=0; i<total_assertion_count; i++)
+    {
+        CFStringGetCString(assertionNames[i], name, 50, kCFStringEncodingMacRoman);
+        CFNumberGetValue(assertionValues[i], kCFNumberIntType, &val);    
+    
+        // Determine if we want to display this assertion 
+        if( !( ( (which & kAssertionCPU) &&
+                CFEqual(assertionNames[i], kIOPMCPUBoundAssertion))
+            || ( (which & kAssertionInflow) &&
+                CFEqual(assertionNames[i], kIOPMInflowDisableAssertion))
+            || ( (which & kAssertionCharge) &&
+                CFEqual(assertionNames[i], kIOPMChargeInhibitAssertion))
+            || ( (which & kAssertionIdle) &&
+                CFEqual(assertionNames[i], kIOPMPreventIdleSleepAssertion)) ) )
+        {
+            // If the caller wasn't interested is this assertion, we pass
+            continue;
+        }
+    
+        if(val)
+        {
+            printf("\t'%s':\t", name);
+            for(j=0; j<pid_count; j++)
+            {                
+                for(k=0; k<CFArrayGetCount(pidAssertions[j]); k++)
+                {
+                    CFDictionaryRef     obj;
+                    if( (obj = (CFDictionaryRef)CFArrayGetValueAtIndex(
+                                        pidAssertions[j], k)))
+                    {
+                        if(matchingAssertion(obj, assertionNames[i]))
+                        {
+                            int pid_num = 0;
+                            CFNumberGetValue(pids[j], kCFNumberIntType, &pid_num);
+                            printf("%d ", pid_num);
+                        }
+                   }
+                }
+            }
+            printf("\n"); fflush(stdout);
+        }
+    }
+    free(assertionNames);
+    free(assertionValues);
+    free(pids);
+    free(pidAssertions);
+    CFRelease(assertions_status);
+    CFRelease(assertions_by_pid);
+
+    return;
+}
 
 /******************************************************************************/
 /*                                                                            */
@@ -957,6 +1081,10 @@ static void show_power_sources(int which)
     CFStringRef         name;
     CFStringRef         state;
     CFStringRef         transport;
+    CFStringRef         health;
+    CFStringRef         confidence;
+    char                _health[10];
+    char                _confidence[10];
     char                _name[60];
     int                 _hours = 0;
     int                 _minutes = 0;
@@ -987,7 +1115,7 @@ static void show_power_sources(int which)
     {
         one_ps = IOPSGetPowerSourceDescription(ps_info, CFArrayGetValueAtIndex(list, i));
         if(!one_ps) break;
-
+       
         // Only display settings for power sources we want to show
         transport = CFDictionaryGetValue(one_ps, CFSTR(kIOPSTransportTypeKey));
         if(!transport) continue;
@@ -1012,8 +1140,14 @@ static void show_power_sources(int which)
         charge = CFDictionaryGetValue(one_ps, CFSTR(kIOPSCurrentCapacityKey));
         capacity = CFDictionaryGetValue(one_ps, CFSTR(kIOPSMaxCapacityKey));
         present = CFDictionaryGetValue(one_ps, CFSTR(kIOPSIsPresentKey));
+        health = CFDictionaryGetValue(one_ps, CFSTR(kIOPSBatteryHealthKey));
+        confidence = CFDictionaryGetValue(one_ps, CFSTR(kIOPSHealthConfidenceKey));
         
         if(name) CFStringGetCString(name, _name, 60, kCFStringEncodingMacRoman);
+        if(health) CFStringGetCString(health, _health, 
+                                        10, kCFStringEncodingMacRoman);
+        if(confidence) CFStringGetCString(confidence, _confidence, 
+                                        10, kCFStringEncodingMacRoman);
         if(charge) CFNumberGetValue(charge, kCFNumberIntType, &_charge);
         if(capacity) CFNumberGetValue(capacity, kCFNumberIntType, &_capacity);
         if(remaining) 
@@ -1047,14 +1181,20 @@ static void show_power_sources(int which)
             }
             if(show_time_estimate && remaining)
                 if(-1 != _minutes)
-                    printf("; %d:%d%d remaining ", _hours, _minutes/10, _minutes%10);
-                else printf("; (no estimate) ");
+                    printf("; %d:%d%d remaining", _hours, _minutes/10, _minutes%10);
+                else printf("; (no estimate)");
+            if(health && confidence) {
+                printf(" (%s/%s)", _health, _confidence);
+            }
             printf("\n"); fflush(stdout);
         } else {
-            printf("(removed)\n");        
+            printf(" (removed)\n");        
         }
     }
-
+    
+    // Display the battery-specific assertions that are affecting the system
+    show_active_assertions( kAssertionInflow | kAssertionCharge );
+    
 exit:
     if(ps_info) CFRelease(ps_info);  
     if(list) CFRelease(list);

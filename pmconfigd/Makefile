@@ -9,7 +9,7 @@ MIG_PRODUCTS = powermanagement.h powermanagementServer.c powermanagementServer.h
 PROJ_ROOT = ..
 UPS_DIR = $(PROJ_ROOT)/ioupsd
 
-CFLAGS = -g -DSTANDALONE -Wall
+CFLAGS = -g -DSTANDALONE -Wall -arch i386 -arch ppc
 FRAMEWORKS = -framework IOKit -framework CoreFoundation -framework SystemConfiguration
 
 all: pmconfigd
@@ -33,7 +33,7 @@ SetActive.c: powermanagementServer.h
 powermanagementServer.o: powermanagementServer.c powermanagementServer.h
 
 IOUPSPrivate.o: $(UPS_DIR)/IOUPSPrivate.c
-	cc -c $(UPS_DIR)/IOUPSPrivate.c
+	cc $(CFLAGS) -c $(UPS_DIR)/IOUPSPrivate.c
 	
 ioupspluginUser.o: ioupspluginUser.c
 

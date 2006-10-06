@@ -33,19 +33,24 @@ struct IOPMBattery {
     bool                    isPresent:1;
     int                     currentCap;
     int                     maxCap;
+    int                     designCap;
     int                     voltage;
     int                     amperage;
+    int                     maxerr;
     int                     cycleCount;
     int                     location;
     int                     hwReportedTR;
     int                     swCalculatedTR;
     int                     invalidWakeSecs;
+    int                     health;
+    int                     healthConfidence;
 };
 typedef struct IOPMBattery IOPMBattery;
 
 __private_extern__ IOPMBattery **_batteries(void);
 __private_extern__ IOPMBattery *_newBatteryFound(io_registry_entry_t);
 __private_extern__ void _batteryChanged(IOPMBattery *);
+__private_extern__ bool _batteryHas(IOPMBattery *, CFStringRef);
 __private_extern__ int  _batteryCount(void);
 __private_extern__ void  _removeBattery(io_registry_entry_t);
 
@@ -60,6 +65,10 @@ __private_extern__ CFUserNotificationRef _showUPSWarning(void);
 __private_extern__ IOReturn _setRootDomainProperty(
                                     CFStringRef     key,
                                     CFTypeRef       val);
+
+__private_extern__ int callerIsRoot(int uid, int gid);
+__private_extern__ int callerIsAdmin(int uid, int gid);
+__private_extern__ int callerIsConsole(int uid, int gid);
 
 
 __private_extern__ void _oneOffHacksSetup(void);

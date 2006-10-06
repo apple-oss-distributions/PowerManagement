@@ -37,51 +37,63 @@
 
 /* SMBus Device addresses */
 enum {
-    kSMBusBatteryAddr                                 = 0xb,
-    kSMBusManagerAddr                                 = 0xa
+    kSMBusBatteryAddr                       = 0xb,
+    kSMBusManagerAddr                       = 0xa,
+    kSMBusChargerAddr                       = 0x9
 };
 
+/*  Charger Commands                                    */
+/*  Smart Battery Charger spec - rev 1.1                */
+/*  Section 5 Charger Interface                         */
+enum {
+    kCChargerModeCmd                        = 0x12
+};
+
+/*  ChargerMode bitfields                               */
+enum {
+    kCInhibitChargeBit                      = 0x01
+};
 
 /*  System Manager Commands                             */
 /*  Smart Battery System Manager spec - rev 1.1         */
 /*  Section 5 SBSM Interface                            */
 enum {
-    kMStateCmd                = 0x01,
-    kMStateContCmd            = 0x02,
-    kMInfoCmd                 = 0x04    
+    kMStateCmd                              = 0x01,
+    kMStateContCmd                          = 0x02,
+    kMInfoCmd                               = 0x04    
 };
 
 /*  SBSM BatterySystemState bitfields                   */
 /*  Smart Battery System Manager spec - rev 1.1         */
 /*  Section 5.1                                         */
 enum {
-    kMPoweredByACBit                       = 0x0000,
-    kMPoweredByBatt_A_Bit                  = 0x0100,
-    kMChargingBatt_A_Bit                   = 0x0010,
-    kMPresentBatt_A_Bit                    = 0x0001
+    kMPoweredByACBit                        = 0x0000,
+    kMPoweredByBatt_A_Bit                   = 0x0100,
+    kMChargingBatt_A_Bit                    = 0x0010,
+    kMPresentBatt_A_Bit                     = 0x0001
 };
 
 /*  SBSM BatterySystemStateCont bitfields               */
 /*  Smart Battery System Manager spec - rev 1.1         */
 /*  Section 5.2                                         */
 enum {
-    kMACPresentBit                         = 0x0001,
-    kMPowerNotGoodBit                      = 0x0002,
-    kMCalibrateRequestSupportBit           = 0x0004,
-    kMCalibrateRequestBit                  = 0x0008,
-    kMChargeInhibitBit                     = 0x0010,
-    kMChargerPowerOnResetBit               = 0x0020,
-    kMCalibrateBit                         = 0x0040
+    kMACPresentBit                          = 0x0001,
+    kMPowerNotGoodBit                       = 0x0002,
+    kMCalibrateRequestSupportBit            = 0x0004,
+    kMCalibrateRequestBit                   = 0x0008,
+    kMChargeInhibitBit                      = 0x0010,
+    kMChargerPowerOnResetBit                = 0x0020,
+    kMCalibrateBit                          = 0x0040
 };
 
 /*  SBSM BatterySystemStateInfo bitfields               */
 /*  Smart Battery System Manager spec - rev 1.1         */
 /*  Section 5.3                                         */
 enum {
-    kMBattPresent_A_Bit                    = 0x0001,
-    kMBattPresent_B_Bit                    = 0x0002,
-    kMBattPresent_C_Bit                    = 0x0004,
-    kMBattPresent_D_Bit                    = 0x0008
+    kMBattPresent_A_Bit                     = 0x0001,
+    kMBattPresent_B_Bit                     = 0x0002,
+    kMBattPresent_C_Bit                     = 0x0004,
+    kMBattPresent_D_Bit                     = 0x0008
 };
 
 /*  Smart Battery Commands                              */
@@ -108,6 +120,7 @@ enum {
     kBRunTimeToEmptyCmd               = 0x11,     // READ WORD
     kBAverageTimeToEmptyCmd           = 0x12,     // READ WORD
     kBAverageTimeToFullCmd            = 0x13,     // READ WORD
+    kBChargingCurrentCmd              = 0x14,     // READ/WRITE WORD
     kBBatteryStatusCmd                = 0x16,     // READ WORD
     kBCycleCountCmd                   = 0x17,     // READ WORD
     kBDesignCapacityCmd               = 0x18,     // READ WORD
@@ -125,7 +138,7 @@ enum {
 /*  Smart Battery Data Specification - rev 1.1          */
 /*  Section 5.1.4 page 15                               */
 enum {
-    kBInternalChargeControllerBit       = 0x00,
+    kBInternalChargeControllerBit     = 0x00,
     kBPrimaryBattSupportBit           = 0x01,
     kBConditionFlagBit                = 0x07,
     kBChargeControllerEnabledBit      = 0x08,

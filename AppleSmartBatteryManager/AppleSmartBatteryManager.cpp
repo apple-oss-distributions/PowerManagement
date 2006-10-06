@@ -21,6 +21,8 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <IOKit/pwr_mgt/RootDomain.h>
+
 #include "AppleSmartBatteryManager.h"
 #include "AppleSmartBattery.h"
 
@@ -28,6 +30,12 @@
 // Power states!
 enum {
     kMyOnPowerState = 1
+};
+
+// Commands!
+enum {
+    kInhibitChargingCmd = 0,
+    kDisableInflowCmd
 };
 
 static IOPMPowerState myTwoStates[2] = {
@@ -54,6 +62,12 @@ bool AppleSmartBatteryManager::start(IOService *provider)
     if(!fProvider) {
         return false;
     }
+    
+    const OSSymbol *ucClassName = 
+            OSSymbol::withCStringNoCopy("AppleSmartBatteryManagerUserClient");
+    setProperty(gIOUserClientClassKey, (OSObject *) ucClassName);
+    ucClassName->release();
+    
 
     wl = getWorkLoop();
     if (!wl) {
@@ -74,17 +88,42 @@ bool AppleSmartBatteryManager::start(IOService *provider)
     ret_bool = fBattery->attach(this);
 
     ret_bool = fBattery->start(this);
+
+    // Command gate for SmartBatteryManager
+    fManagerGate = IOCommandGate::commandGate(this);
+    if (!fManagerGate) {
+        return false;
+    }
+    wl->addEventSource(fManagerGate);
     
+    // Command gate for SmartBattery
     gate = IOCommandGate::commandGate(fBattery);
     if (!gate) {
         return false;
     }
     wl->addEventSource(gate);
-    fGate = gate;      // enable messages
+    fBatteryGate = gate;      // enable messages
 
     fBattery->registerService(0);
 
+    this->registerService(0);
+
     return true;
+}
+
+// Default polling interval is 30 seconds
+IOReturn AppleSmartBatteryManager::setPollingInterval(
+    int milliSeconds)
+{
+    // Discard any negatize or zero arguments
+    if(milliSeconds <= 0) return kIOReturnBadArgument;
+    
+    if(fBattery)
+        fBattery->setPollingInterval(milliSeconds);
+
+    setProperty("PollingInterval_msec", milliSeconds, 32);
+
+    return kIOReturnSuccess;
 }
 
 IOReturn AppleSmartBatteryManager::performTransaction(
@@ -105,11 +144,11 @@ IOReturn AppleSmartBatteryManager::setPowerState(
     IOService *whom)
 {
     if( (kMyOnPowerState == which) 
-        && fGate )
+        && fBatteryGate )
     {
         // We are waking from sleep - kick off a battery read to make sure
         // our battery concept is in line with reality.
-        fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+        fBatteryGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
                            fBattery, &AppleSmartBattery::pollBatteryState),
                            (void *)1, NULL, NULL, NULL); // kNewBatteryPath = 1
     }
@@ -134,7 +173,7 @@ IOReturn AppleSmartBatteryManager::message(
     
     if( (kIOMessageSMBusAlarm == type) 
         && (kSMBusManagerAddr == alarm->fromAddress)
-        && fGate)
+        && fBatteryGate)
     {
         data = (uint16_t)(alarm->data[0] | (alarm->data[1] << 8));
         changed_bits = data ^ last_data;
@@ -144,24 +183,193 @@ IOReturn AppleSmartBatteryManager::message(
         {
             if(data & kMPresentBatt_A_Bit) {
                 // Battery inserted
-                fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                fBatteryGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
                                fBattery, &AppleSmartBattery::handleBatteryInserted),
                                NULL, NULL, NULL, NULL);
             } else {
                 // Battery removed
-                fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                fBatteryGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
                                fBattery, &AppleSmartBattery::handleBatteryRemoved),
                                NULL, NULL, NULL, NULL);
             }
         } else {
             // Just an alarm; re-read battery state.
-            fGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+            fBatteryGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
                                fBattery, &AppleSmartBattery::pollBatteryState),
                                NULL, NULL, NULL, NULL);
         }
     }
 
     return kIOReturnSuccess;
+}
+
+/* 
+ * inhibitCharging
+ * 
+ * Called by AppleSmartBatteryManagerUserClient
+ */
+IOReturn AppleSmartBatteryManager::inhibitCharging(int level)
+{
+    IOReturn        ret = kIOReturnSuccess;
+    
+    if(!fManagerGate) return kIOReturnInternalError;
+    
+    this->setProperty("Charging Inhibited", level ? true : false);
+    
+    fManagerGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                       this, &AppleSmartBatteryManager::gatedSendCommand),
+                       (void *)kInhibitChargingCmd, (void *)level, 
+                       (void *)&ret, NULL);
+
+    return ret;
+}
+
+/* 
+ * disableInflow
+ * 
+ * Called by AppleSmartBatteryManagerUserClient
+ */
+IOReturn AppleSmartBatteryManager::disableInflow(int level)
+{
+    IOReturn        ret = kIOReturnSuccess;
+
+    if(!fManagerGate) return kIOReturnInternalError;
+
+    this->setProperty("Inflow Disabled", level ? true : false);
+    
+    fManagerGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                       this, &AppleSmartBatteryManager::gatedSendCommand),
+                       (void *)kDisableInflowCmd, (void *)level, 
+                       (void *)&ret, NULL);
+    
+    return ret;
+}
+
+/* 
+ * handleFullDischarge
+ * 
+ * Called by AppleSmartBattery
+ * If inflow is disabled, by the user client, we re-enable it and send a message
+ * via IOPMrootDomain indicating that inflow has been re-enabled.
+ */
+void AppleSmartBatteryManager::handleFullDischarge(void)
+{
+    IOPMrootDomain      *root_domain = getPMRootDomain();
+    IOReturn            ret;
+    void *              messageArgument = NULL;
+
+    if( getProperty("Inflow Disabled") )
+    {
+        messageArgument = (void *)kInflowForciblyEnabledBit;
+
+        /* 
+         * Send disable inflow command to SB Manager
+         */
+        fManagerGate->runAction(OSMemberFunctionCast(IOCommandGate::Action,
+                           this, &AppleSmartBatteryManager::gatedSendCommand),
+                           (void *)kDisableInflowCmd, (void *)0, /* OFF */ 
+                           (void *)&ret, NULL);        
+    }
+
+
+    /* 
+     * Message user space clients that battery is fully discharged.
+     * If appropriate, set kInflowForciblyEnabledBit
+     */
+    if(root_domain) {
+        root_domain->messageClients( 
+                kIOPMMessageInternalBatteryFullyDischarged, 
+                messageArgument );
+    }
+}
+
+
+void AppleSmartBatteryManager::gatedSendCommand(
+    int cmd, 
+    int level, 
+    IOReturn *ret_code)
+{
+    *ret_code = kIOReturnError;
+    bzero(&fTransaction, sizeof(IOSMBusTransaction));
+
+    fTransaction.protocol      = kIOSMBusProtocolWriteWord;
+    fTransaction.sendDataCount = 2;
+    
+    /*
+     * kDisableInflowCmd
+     */
+    if( kDisableInflowCmd == cmd) 
+    {
+        fTransaction.address            = kSMBusManagerAddr;
+        fTransaction.command            = kMStateContCmd;
+        if( 0 != level ) {
+            fTransaction.sendData[0]    = kMCalibrateBit;
+        } else {
+            fTransaction.sendData[0]    = 0x0;
+        }
+    }
+
+    /*
+     * kInhibitChargingCmd
+     */
+    if( kInhibitChargingCmd == cmd) 
+    {
+        fTransaction.address            = kSMBusChargerAddr;
+        fTransaction.command            = kBChargingCurrentCmd;
+        if( 0 != level ) {
+            // non-zero level for chargeinhibit means turn off charging.
+            // We set charge current to 0.
+            fTransaction.sendData[0]    = 0x0;
+        } else {
+            // We re-enable charging by setting it to 6000, a signifcantly
+            // large number (> 4500 per Chris C) to ensure charging will resume.
+            fTransaction.sendData[0]    = 0x70;
+            fTransaction.sendData[1]    = 0x17;
+        }
+    }
+
+    *ret_code = fProvider->performTransaction(
+                    &fTransaction,
+                    OSMemberFunctionCast( IOSMBusTransactionCompletion,
+                      this, &AppleSmartBatteryManager::transactionCompletion),
+                    (OSObject *)this);
+                    
+exit:
+    return;
+}
+
+bool AppleSmartBatteryManager::transactionCompletion(
+    void *ref, 
+    IOSMBusTransaction *transaction)
+{
+    if( kIOSMBusStatusOK == transaction->status )
+    {
+        // If we just completed sending the DisableInflow command, give a 
+        // callout to our attached battery and let them know whether its
+        // enabled or disabled.
+        if( (kMStateContCmd == transaction->command)
+            && (kSMBusManagerAddr == transaction->address) )
+        {
+            fBattery->handleInflowDisabled( 
+                        transaction->sendData[0] ? true : false);        
+        }
+
+        // If we just completed sending the ChargeInhibit command, give a 
+        // callout to our attached battery and let them know whether its
+        // enabled or disabled.
+        if( (kBChargingCurrentCmd == transaction->command)
+            && (kSMBusChargerAddr == transaction->address) )
+        {
+            fBattery->handleChargeInhibited( 
+                        (transaction->sendData[0] | transaction->sendData[1]) 
+                        ? false : true);
+        }       
+        
+    } else {
+        BattLog("AppleSmartBatteryManager::transactionCompletion:"\
+                                    "ERROR 0x%08x!\n", transaction->status);
+    }
+    return false;
 }
 
 void BattLog(char *fmt, ...)

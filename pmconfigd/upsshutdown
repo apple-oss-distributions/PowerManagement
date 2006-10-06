@@ -24,6 +24,16 @@ if ! [ "${FAILOVER_EMAIL_RECIPIENT:=-AUTOMATIC-}" = "-AUTOMATIC-" ] ; then
 fi
 
 #
-# Wait for watchdog and take the system down cleanly.
+# Take the system down.
 #
-shutdown -h now "${MSG}"
+if [[ -n $1 && "WaitForUPS" == $1 ]] ; then
+    #
+    # Wait for UPS to take the system down abruptly and unexpectedly.
+    #
+    shutdown -hu now "${MSG}"
+else
+    #
+    # Gently shutdown the system immediately.
+    #
+    shutdown -h now "${MSG}"
+fi

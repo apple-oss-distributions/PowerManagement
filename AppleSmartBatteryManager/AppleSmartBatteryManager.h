@@ -27,12 +27,18 @@
 #include <IOKit/IOService.h>
 #include <IOKit/smbus/IOSMBusController.h>
 #include "AppleSmartBattery.h"
+#include "AppleSmartBatteryManagerUserClient.h"
+
+
+void BattLog(char *fmt, ...);
 
 void BattLog(char *fmt, ...);
 
 class AppleSmartBattery;
+class AppleSmartBatteryManagerUserClient;
 
-class AppleSmartBatteryManager : public IOService {
+class AppleSmartBatteryManager : public IOService {    
+    friend class AppleSmartBatteryManagerUserClient;
     
     OSDeclareDefaultStructors(AppleSmartBatteryManager)
     
@@ -48,8 +54,29 @@ public:
 
     IOReturn message(UInt32 type, IOService *provider, void * argument);
 
+    // Called by AppleSmartBattery
+    // Re-enables AC inflow if appropriate
+    void AppleSmartBatteryManager::handleFullDischarge(void);
+    
 private:
-    IOCommandGate               * fGate;
+    // Called by AppleSmartBatteryManagerUserClient
+    IOReturn inhibitCharging(int level);        
+
+    // Called by AppleSmartBatteryManagerUserClient
+    IOReturn disableInflow(int level);
+
+    // Called by AppleSmartBatteryManagerUserClient
+    IOReturn setPollingInterval(int milliSeconds);    
+
+    void    gatedSendCommand(int cmd, int level, IOReturn *ret_code);
+
+    // transactionCompletion is the guts of the state machine
+    bool    transactionCompletion(void *ref, IOSMBusTransaction *transaction);
+
+private:
+    IOSMBusTransaction          fTransaction;
+    IOCommandGate               * fBatteryGate;
+    IOCommandGate               * fManagerGate;
     IOSMBusController           * fProvider;
     AppleSmartBattery           * fBattery;
 };

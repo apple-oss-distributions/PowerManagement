@@ -234,7 +234,7 @@ static void BatteryMatch(
     io_registry_entry_t         battery;
     io_object_t                 notification_ref;
     
-    while(battery = (io_registry_entry_t)IOIteratorNext(b_iter)) 
+    while((battery = (io_registry_entry_t)IOIteratorNext(b_iter))) 
     {
         // Add battery to our list of batteries
         tracking = _newBatteryFound(battery);
@@ -377,7 +377,7 @@ static void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
 {
     io_object_t                 upsDevice = MACH_PORT_NULL;
         
-    while ( upsDevice = IOIteratorNext(iterator) )
+    while ( (upsDevice = IOIteratorNext(iterator)) )
     {
         // If not running, launch the management process ioupsd now.
         if(!_alreadyRunningIOUPSD) {
@@ -507,7 +507,7 @@ displayPowerStateChange(void *ref, io_service_t service, natural_t messageType, 
         case kIOMessageDeviceHasPoweredOn:
             level = 0;
             break;
-    }            
+    }
 }
 
 /* initializeESPrefsDynamicStore
@@ -532,8 +532,19 @@ initializeESPrefsDynamicStore(void)
                                 NULL, 
                                 CFSTR(kIOPMPrefsPath), 
                                 kSCPreferencesKeyApply);
+ 
+/*    EnergyPrefsKey = SCPreferencesPathKeyCreate(
+                                    kCFAllocatorDefault, 
+                                    @"%@:%@:%@",
+                                    
+                                    kSCPreferencesKeyApply,
+                                    CFSTR(kIOPMPrefsPath) );
+
+*/
+    CFShow(EnergyPrefsKey);
+
     if(EnergyPrefsKey) 
-        CFArrayAppendValue(watched_keys, EnergyPrefsKey);
+    CFArrayAppendValue(watched_keys, EnergyPrefsKey);
 
     // Setup notification for changes in AutoWake prefences
     AutoWakePrefsKey = SCDynamicStoreKeyCreatePreferences(
@@ -742,6 +753,59 @@ kern_return_t _io_pm_set_active_profile(
     // deallocate client's memory
     vm_deallocate(mach_task_self(), (vm_address_t)profiles_ptr, profiles_len);
 
+    return KERN_SUCCESS;
+}
+
+
+static bool _assertionRequiresRoot(CFStringRef   asst)
+{
+    if( CFEqual(asst, kIOPMInflowDisableAssertion)
+       || CFEqual(asst, kIOPMChargeInhibitAssertion) )
+    {
+        return true;
+    }
+    
+    return false;
+}
+
+kern_return_t _io_pm_assertion_create
+(
+    mach_port_t         server,
+    mach_port_t         task,
+    string_t            profile,
+    mach_msg_type_number_t   profileCnt,
+    int                 level,
+    int                 *assertion_id,
+    int                 *result
+)
+{
+    CFStringRef     profileString = NULL;
+
+    profileString = CFStringCreateWithCString(0, profile, 
+                            kCFStringEncodingMacRoman);
+
+    // Kick them out if this assertion requires root priviliges to run
+    if( _assertionRequiresRoot(profileString) )
+    {
+        // uid & gid set in global vars in pm_mig_demux above
+        if( ( !callerIsRoot(gClientUID, gClientGID) 
+            && !callerIsAdmin(gClientUID, gClientGID) )
+            || (-1 == gClientUID) || (-1 == gClientGID) )
+        {
+            *result = kIOReturnNotPrivileged;
+            goto exit;    
+        }
+    }
+
+    if(!profileString) goto exit;
+
+    *result = _IOPMAssertionCreateRequiresRoot(task, profileString, 
+                                                level, assertion_id);
+
+    CFRelease(profileString); profileString = NULL;
+
+exit:
+    if(profileString) CFRelease(profileString);
     return KERN_SUCCESS;
 }
 
