@@ -31,14 +31,17 @@
 #include "AppleSmartBattery.h"
 
 // Defines the order of reading properties in the power source state machine
+// Bitfield
 enum {
-    kExistingBatteryPath = 0,
-    kNewBatteryPath = 1
+    kExistingBatteryPath    = 1,
+    kNewBatteryPath         = 2
 };
 
-// Three retry attempts on SMBus command failure
+// Retry attempts on SMBus command failure
 enum { 
-    kRetryAttempts = 5
+    kRetryAttempts = 5,
+    kInitialPollCountdown = 5,
+    kIncompleteReadRetryMax = 10
 };
 
 enum {
@@ -53,6 +56,12 @@ enum {
     kQuickPollInterval = 1
 };
 
+#define kErrorRetryAttemptsExceeded         "Read Retry Attempts Exceeded"
+#define kErrorOverallTimeoutExpired         "Overall Read Timeout Expired"
+#define kErrorZeroCapacity                  "Capacity Read Zero"
+#define kErrorPermanentFailure              "Permanent Battery Failure"
+#define kErrorNonRecoverableStatus          "Non-recoverable status failure"
+
 // Polling intervals
 // The battery kext switches between polling frequencies depending on
 // battery load
@@ -62,22 +71,33 @@ static uint32_t milliSecPollingTable[2] =
       1000      // 1 == Quick 1 second polling
     };
 
+static const uint32_t kBatteryReadAllTimeout = 10000;       // 10 seconds
 
 // Delays to use on subsequent SMBus re-read failures.
 // In microseconds.
 static const uint32_t microSecDelayTable[kRetryAttempts] = 
     { 10, 100, 1000, 10000, 250000 };
                 
-                
+
+/* The union of the errors listed in STATUS_ERROR_NEEDS_RETRY
+ * and STATUS_ERROR_NON_RECOVERABLE should equal the entirety of 
+ * SMBus errors listed in IOSMBusController.h
+ */
 #define STATUS_ERROR_NEEDS_RETRY(err)                           \
     ( (kIOSMBusStatusDeviceAddressNotAcknowledged == err)       \
+   || (kIOSMBusStatusDeviceCommandAccessDenied == err)          \
+   || (kIOSMBusStatusDeviceAccessDenied == err)                 \
    || (kIOSMBusStatusUnknownHostError == err)                   \
    || (kIOSMBusStatusUnknownFailure == err)                     \
    || (kIOSMBusStatusDeviceError == err)                        \
    || (kIOSMBusStatusTimeout == err)                            \
    || (kIOSMBusStatusBusy == err) )
 
-
+#define STATUS_ERROR_NON_RECOVERABLE(err)                       \
+    ( (kIOSMBusStatusHostUnsupportedProtocol == err)            \
+   || (kIOSMBusStatusPECError == err) )
+   
+   
 // Keys we use to publish battery state in our IOPMPowerSource::properties array
 static const OSSymbol *_MaxErrSym = 
                         OSSymbol::withCString(kIOPMPSMaxErrKey);
@@ -93,6 +113,7 @@ static const OSSymbol *_ManfDateSym =
                         OSSymbol::withCString(kIOPMPSManufactureDateKey);
 static const OSSymbol *_DesignCapacitySym = 
                         OSSymbol::withCString(kIOPMPSDesignCapacityKey);
+
 
 #define super IOPMPowerSource
 OSDefineMetaClassAndStructors(AppleSmartBattery,IOPMPowerSource)
@@ -144,7 +165,8 @@ bool AppleSmartBattery::init(void)
 bool AppleSmartBattery::start(IOService *provider)
 {
     IOReturn        err;
-
+    OSNumber        *debugPollingSetting;
+   
     BattLog("AppleSmartBattery loading...\n");
     
     fProvider = OSDynamicCast(AppleSmartBatteryManager, provider);
@@ -153,17 +175,46 @@ bool AppleSmartBattery::start(IOService *provider)
         return false;
     }
 
-    fPollingInterval = kDefaultPollInterval;
+    debugPollingSetting = (OSNumber *)fProvider->getProperty(kBatteryPollingDebugKey);
+    if( debugPollingSetting && OSDynamicCast(OSNumber, debugPollingSetting) )
+    {
+        /* We set our polling interval to the "BatteryPollingPeriodOverride" property's value,
+            in seconds.
+            Polling Period of 0 causes us to poll endlessly in a loop for testing.
+         */
+        fPollingInterval = debugPollingSetting->unsigned32BitValue();
+        fPollingOverridden = true;
+    } else {
+        fPollingInterval = kDefaultPollInterval;
+        fPollingOverridden = false;
+    }
+    
     fPollingNow = false;
     fCancelPolling = false;
-
+    fRetryAttempts = 0;
+    fFullyDischarged = false;
+    fFullyCharged = false;
+    fBatteryPresent = false;
+    fACConnected = false;
+    fAvgCurrent = 0;
     fInflowDisabled = false;
+    fRebootPolling = false;
+
+    fIncompleteReadRetries = kIncompleteReadRetryMax;
+    
+    // Make sure that we read battery state at least 5 times at 30 second intervals
+    // after system boot.
+    fInitialPollCountdown = kInitialPollCountdown;    
     
     fWorkLoop = getWorkLoop();
     
     fPollTimer = IOTimerEventSource::timerEventSource( this, 
                     OSMemberFunctionCast( IOTimerEventSource::Action, 
-                    this, &AppleSmartBattery::timedOut) );
+                    this, &AppleSmartBattery::pollingTimeOut) );
+                    
+    fBatteryReadAllTimer = IOTimerEventSource::timerEventSource( this,
+                    OSMemberFunctionCast( IOTimerEventSource::Action,
+                    this, &AppleSmartBattery::incompleteReadTimeOut) );
 
     if( !fWorkLoop || !fPollTimer
       || (kIOReturnSuccess != fWorkLoop->addEventSource(fPollTimer)) )
@@ -197,6 +248,29 @@ bool AppleSmartBattery::start(IOService *provider)
     return true;
 }
 
+/******************************************************************************
+ * AppleSmartBattery::logReadError
+ *
+ ******************************************************************************/
+void AppleSmartBattery::logReadError(
+    const char *error_type, 
+    uint16_t additional_error,
+    IOSMBusTransaction *t)
+{
+    if(!error_type) return;
+
+    setProperty((const char *)"LatestErrorType", error_type);
+
+    IOLog("SmartBatteryManager Error: %s (%d)\n", error_type, additional_error);  
+    
+    if(t) {
+        IOLog("\tCorresponding transaction addr=0x%02x cmd=0x%02x status=0x%02x\n",
+                                            t->address, t->command, t->status);
+    }
+    
+    return;
+}
+
 
 /******************************************************************************
  * AppleSmartBattery::setPollingInterval
@@ -205,8 +279,10 @@ bool AppleSmartBattery::start(IOService *provider)
 void AppleSmartBattery::setPollingInterval(
     int milliSeconds)
 {
-    milliSecPollingTable[kDefaultPollInterval] = milliSeconds;
-    fPollingInterval = kDefaultPollInterval;
+    if (!fPollingOverridden) {
+        milliSecPollingTable[kDefaultPollInterval] = milliSeconds;
+        fPollingInterval = kDefaultPollInterval;
+    }
 }
 
 /******************************************************************************
@@ -220,8 +296,16 @@ bool AppleSmartBattery::pollBatteryState(int path)
     // This must be called under workloop synchronization
     fMachinePath = path;
 
-    /* Start the battery polling state machine in the 0 start state */    
-    return transactionCompletion((void *)0, NULL);
+    if( !fPollingNow )
+    {
+        /* Start the battery polling state machine in the 0 start state */    
+        return transactionCompletion((void *)0, NULL);
+    } else {
+        /* Outstanding transaction in process; flag it to restart polling from
+           scratch when this flag is noticed. 
+         */
+        fRebootPolling = true;
+    }
 }
 
 void AppleSmartBattery::handleBatteryInserted(void)
@@ -234,6 +318,13 @@ void AppleSmartBattery::handleBatteryInserted(void)
 
 void AppleSmartBattery::handleBatteryRemoved(void)
 {
+    /* Removed battery means cancel any ongoing polling session */
+    if(fPollingNow) {
+        fCancelPolling = true;
+        fPollTimer->cancelTimeout();    
+        fBatteryReadAllTimer->cancelTimeout();
+    }
+    
     // This must be called under workloop synchronization
     clearBatteryState(true);
 
@@ -258,6 +349,51 @@ void AppleSmartBattery::handleChargeInhibited(bool charge_state)
 
 
 /******************************************************************************
+ * pollingTimeOut
+ *
+ * Regular 30 second poll expiration handler.
+ ******************************************************************************/
+
+void AppleSmartBattery::pollingTimeOut(void)
+{
+    // Timer will be re-enabled from the battery polling routine.
+    // Timer will not be kicked off again if battery is plugged in and
+    // fully charged.
+    if( !fPollingNow )
+        pollBatteryState( kExistingBatteryPath );
+}
+
+
+/******************************************************************************
+ * incompleteReadTimeOut
+ * 
+ * The complete battery read has not completed in the allowed timeframe.
+ * We assume this is for several reasons:
+ *    - The EC has dropped an SMBus packet (probably recoverable)
+ *    - The EC has stalled an SMBus request; IOSMBusController is hung (probably not recoverable)
+ *
+ * Start the battery read over from scratch.
+ *****************************************************************************/
+
+void AppleSmartBattery::incompleteReadTimeOut(void)
+{
+    logReadError(kErrorOverallTimeoutExpired, 0, NULL);
+
+    /* Don't launch infinite re-tries if the system isn't completing my transactions
+     *  (and thus probably leaking a lot of memory every time.
+     *  Quit after kIncompleteReadRetryMax
+     */
+    if( 0 < fIncompleteReadRetries )
+    {
+        fIncompleteReadRetries--;
+    
+        // Re-start
+        pollBatteryState( kNewBatteryPath );
+    }
+}
+
+
+/******************************************************************************
  * AppleSmartBattery::transactionCompletion
  * -> Runs in workloop context
  *
@@ -272,25 +408,33 @@ bool AppleSmartBattery::transactionCompletion(
     uint16_t    my_unsigned_16;
     uint8_t     time_command = 0;
     uint32_t    delay_for = 0;
-
+    IOSMBusStatus transaction_status;
+    bool        transaction_needs_retry = false;
     char        recv_str[kIOSMBusMaxDataCount+1];
 
-    IOSMBusStatus transaction_status;
 
-    static int retry_attempts = 0;
+    /* Do we need to abort an ongoing polling session? 
+       Example: If a battery has just been removed in the midst of our polling, we
+       need to abort the remainder of our scheduled SMBus reads. 
+       
+       We do not abort newly started polling sessions where (NULL == transaction).
+     */
+    if( transaction && fCancelPolling )
+    {
+        fCancelPolling = false;
+        fPollingNow = false;
+        return true;
+    }
 
-    static bool fully_discharged = false;
-    static bool fully_charged = false;
-    static bool batt_present = true;
-    static int  ac_connected = -1;
-    static int  avg_current = 0;
-
-
-    if( NULL == transaction ) 
+    /* 
+     * Retry a failed transaction
+     */
+    if( NULL == transaction || fRebootPolling ) 
     {
         // NULL argument for transaction means we should start
         // the state machine from scratch. Zero is the start state.
         next_state = 0;
+        fRebootPolling = false;
     } else {
         transaction_status = transaction->status;
 
@@ -298,21 +442,104 @@ bool AppleSmartBattery::transactionCompletion(
                     next_state, transaction_status,
                     transaction->receiveData[1], transaction->receiveData[0]);
 
+        /******************************************************************************************
+         ******************************************************************************************/
+
+        /* If the last transaction wasn't successful at the SMBus level, retry.
+         */
+        if( STATUS_ERROR_NEEDS_RETRY(transaction_status) )
+        {
+            transaction_needs_retry = true;
+        } else if( STATUS_ERROR_NON_RECOVERABLE(transaction_status) )
+        {
+            transaction_needs_retry = false;
+            logReadError(kErrorNonRecoverableStatus, transaction_status, transaction);
+        }
+
+        /* EVENTUAL SUCCESS after some number of status retries */
         if( (kIOSMBusStatusOK == transaction_status) 
-           && (0 != retry_attempts) )
+           && (0 != fRetryAttempts) )
         {
-            // Transaction succeeded after some number of retries            
-            BattLog("SmartBattery: retry %d succeeded!\n", retry_attempts);
+            BattLog("SmartBattery: retry %d succeeded!\n", fRetryAttempts);
 
-            retry_attempts = 0;            
+            fRetryAttempts = 0;
+            transaction_needs_retry = false;    /* potentially overridden below */
+        }  
+        
+        /******************************************************************************************
+         ******************************************************************************************/
 
-        } else if( STATUS_ERROR_NEEDS_RETRY(transaction_status)
-                   && (retry_attempts < kRetryAttempts) )
+        if( kIOSMBusStatusOK == transaction_status )
         {
+            /* Check for absurd return value for RemainingCapacity or FullChargeCapacity.
+               If the returned value is zero, re-read until it's non-zero (or until we 
+               try too many times).
+               
+               (FullChargeCapacity = 0) is NOT a valid state
+               (DesignCapacity = 0) is NOT a valid state
+               (RemainingCapacity = 0) is a valid state
+               (RemainingCapacity = 0) && !fFullyDischarged is NOT a valid state
+             */
+            if( ((kBFullChargeCapacityCmd == transaction->command)
+                  || (kBDesignCapacityCmd == transaction->command)
+                  || ((kBRemainingCapacityCmd == transaction->command) 
+                        && !fFullyDischarged) )
+               && ((transaction->receiveData[1] == 0)
+                  && (transaction->receiveData[0] == 0)) )
+            {
+                IOLog("SmartBatteryManager: retrying command 0x%02x; retry due to absurd value _zero_\n",
+                        transaction->command);
+                transaction_needs_retry = true;
+            }
+     
+            /* EVENTUAL SUCCESS after zero capacity retry */
+            if( ((kBRemainingCapacityCmd == transaction->command) 
+                  || (kBDesignCapacityCmd == transaction->command)
+                  || (kBFullChargeCapacityCmd == transaction->command)) 
+               && ((transaction->receiveData[1] != 0)
+                  || (transaction->receiveData[0] != 0))
+               && (0 != fRetryAttempts) )
+            {
+                IOLog("SmartBatteryManager: Successfully read %d on retry %d\n",
+                        transaction->command, fRetryAttempts);
+                fRetryAttempts = 0;
+                transaction_needs_retry = false;
+            }
+        }
+
+        /*******************************************************************************************
+         ******************************************************************************************/
+
+        /* Too many retries already?
+         */
+        if( transaction_needs_retry
+           && (kRetryAttempts == fRetryAttempts) ) 
+        {
+            // Too many consecutive failures to read this entry. Give up, and 
+            // go on to attempt a read on the next element in the state machine.
+            // ** These two setProperty lines are here purely for debugging. **
+            setProperty("LastBattReadError", transaction_status, 16);
+            setProperty("LastBattReadErrorCmd", transaction->command, 16);
+
+            IOLog("SmartBatteryManager: Giving up on retries\n");
+            BattLog("SmartBattery: Giving up on (0x%02x, 0x%02x) after %d retries.\n",
+                transaction->address, transaction->command, fRetryAttempts);
+
+            logReadError(kErrorRetryAttemptsExceeded, transaction_status, transaction);
+
+            fRetryAttempts = 0;
+
+            transaction_needs_retry = false;
+        }
+        
+        /* Finally we actually retry!!
+         */
+        if( transaction_needs_retry )
+        {        
             // The transaction failed. We'll delay by the specified time,
             // then retry the transaction.
             
-            delay_for = microSecDelayTable[retry_attempts];
+            delay_for = microSecDelayTable[fRetryAttempts];
             
             if( 0 != delay_for ) {
                 if( delay_for < 1000 ) {
@@ -324,40 +551,35 @@ bool AppleSmartBattery::transactionCompletion(
                 }            
             }
             
-            retry_attempts++;
+            fRetryAttempts++;
             
-            BattLog("SmartBattery: failed with 0x%02x; retry attempt %d of %d\n",
-                            transaction_status, retry_attempts, kRetryAttempts);
+            BattLog("SmartBattery: 0x%02x failed with 0x%02x; retry attempt %d of %d\n",
+                        transaction->command, transaction_status, fRetryAttempts, kRetryAttempts);
 
             // Kick off the same transaction that just failed
             readWordAsync(transaction->address, transaction->command);
 
             return true;
-        } else if( kRetryAttempts == retry_attempts ) 
-        {
-            // Too many consecutive failures to read this entry. Give up, and 
-            // go on to attempt a read on the next element in the state machine.
-            // ** These two setProperty lines are here purely for debugging. **
-            setProperty("LastBattReadError", transaction_status, 16);
-            setProperty("LastBattReadErrorCmd", transaction->command, 16);
-
-            BattLog("SmartBattery: Giving up on (0x%02x, 0x%02x) after %d retries.\n",
-                transaction->address, transaction->command, retry_attempts);
-
-            retry_attempts = 0;
         }
     }
 
-
-
+    /***********************************************************************************************
+     **********************************************************************************************/        
+     
     switch(next_state)
     {
-    
         case 0:
             
             /* Cancel polling timer in case this round of reads was initiated
                by an alarm. We re-set the 30 second poll later. */
             fPollTimer->cancelTimeout();
+
+            fCancelPolling = false;
+            fPollingNow = true;
+            
+            /* Initialize battery read timeout to catch any longstanding stalls. */           
+            fBatteryReadAllTimer->cancelTimeout();
+            fBatteryReadAllTimer->setTimeoutMS( kBatteryReadAllTimeout );
 
             readWordAsync(kSMBusManagerAddr, kMStateContCmd);
 
@@ -390,7 +612,7 @@ bool AppleSmartBattery::transactionCompletion(
                 // Tell IOPMrootDomain on ac connect/disconnect
 
                 IOPMrootDomain *rd = getPMRootDomain();
-                if( rd && (new_ac_connected != ac_connected) ) {
+                if( rd && (new_ac_connected != fACConnected) ) {
                     if(new_ac_connected) {
                         rd->receivePowerNotification( kIOPMSetACAdaptorConnected 
                                                     | kIOPMSetValue );
@@ -399,13 +621,13 @@ bool AppleSmartBattery::transactionCompletion(
                     }
                 }
 
-                ac_connected = new_ac_connected;
+                fACConnected = new_ac_connected;
 
-                setExternalConnected(ac_connected);
+                setExternalConnected(fACConnected);
                 setExternalChargeCapable(
                         (my_unsigned_16 & kMPowerNotGoodBit) ? false:true);
             } else {
-                ac_connected = false;
+                fACConnected = false;
                 setExternalConnected(true);
                 setExternalChargeCapable(false);
             }
@@ -423,10 +645,10 @@ bool AppleSmartBattery::transactionCompletion(
                 my_unsigned_16 = (transaction->receiveData[1] << 8)
                                 | transaction->receiveData[0];
                                 
-                batt_present = (my_unsigned_16 & kMPresentBatt_A_Bit) 
+                fBatteryPresent = (my_unsigned_16 & kMPresentBatt_A_Bit) 
                                 ? true : false;
 
-                setBatteryInstalled(batt_present);
+                setBatteryInstalled(fBatteryPresent);
 
                 // If fChargeInhibit is currently set, then we acknowledge 
                 // our lack of charging and force the "isCharging" bit to false.
@@ -440,7 +662,7 @@ bool AppleSmartBattery::transactionCompletion(
                 setIsCharging( !fChargeInhibited
                     &&  (my_unsigned_16 & kMChargingBatt_A_Bit) ? true:false);    
             } else {
-                batt_present = false;
+                fBatteryPresent = false;
                 setBatteryInstalled(false);
                 setIsCharging(false);
             }
@@ -451,16 +673,70 @@ bool AppleSmartBattery::transactionCompletion(
                Otherwise, if the battery is not present, we zero out all
                the settings that would have been set in a connected battery. 
             */
-            if(!batt_present) {
+
+            if(!fBatteryPresent) {                
                 // Clean-up battery state for absent battery; do no further
                 // battery work until messaged that another battery has
                 // arrived.
                 
                 // zero out battery state with argument (do_update == true)
+                fPollingNow = false;
                 clearBatteryState(true);
                 return true;
             }
 
+            readWordAsync(kSMBusBatteryAddr, kBBatteryStatusCmd);
+
+            break;
+
+        case kBBatteryStatusCmd:
+
+            if( kIOSMBusStatusOK != transaction_status ) 
+            {
+                fFullyCharged = false;
+                fFullyDischarged = false;
+            } else {
+                my_unsigned_16 = (transaction->receiveData[1] << 8)
+                                | transaction->receiveData[0];
+
+                if ( my_unsigned_16 & kBFullyChargedStatusBit) {
+                    fFullyCharged = true;
+                } else {
+                    fFullyCharged = false;
+                }
+                
+                if ( my_unsigned_16 & kBFullyDischargedStatusBit)
+                {
+                    if(!fFullyDischarged) {
+                        fFullyDischarged = true;
+    
+                        // Immediately cancel AC Inflow disable
+                        fProvider->handleFullDischarge();
+                    }
+                } else {
+                    fFullyDischarged = false;
+                }
+                
+                /* Detect battery permanent failure 
+                 * Permanent battery failure is marked by 
+                 * (TerminateDischarge & TerminateCharge) bits being set simultaneously.
+                 */
+                if( (my_unsigned_16 
+                    & (kBTerminateDischargeAlarmBit | kBTerminateChargeAlarmBit)) 
+                    == (kBTerminateDischargeAlarmBit | kBTerminateChargeAlarmBit) )
+                {
+                    /* make note of the error */
+                    logReadError( kErrorPermanentFailure, 0, transaction);
+                    setProperty( kErrorPermanentFailure, true);
+                    
+                    /* abort polling; report battery as missing */
+                    fBatteryReadAllTimer->cancelTimeout();
+                    fPollingNow = false;
+                    handleBatteryRemoved();
+                }
+            }
+            
+            setFullyCharged(fFullyCharged);
 
             // The battery read state machine may fork at this stage.
             if(kNewBatteryPath == fMachinePath) {
@@ -609,8 +885,21 @@ bool AppleSmartBattery::transactionCompletion(
                 
                 setCurrentCapacity( (unsigned int)my_unsigned_16 );
             } else {
+                fRemainingCapacity = 0;
                 setCurrentCapacity(0);
             }
+
+
+
+            if ( 0 == fRemainingCapacity )
+            {
+                // fRemainingCapacity == 0 is an absurd value.
+                
+                // We have already retried several times, so we accept this value and move on.
+                
+                logReadError(kErrorZeroCapacity, kBRemainingCapacityCmd, transaction);
+            }
+
 
             readWordAsync(kSMBusBatteryAddr, kBFullChargeCapacityCmd);
         
@@ -627,7 +916,7 @@ bool AppleSmartBattery::transactionCompletion(
 
                 setMaxCapacity( my_unsigned_16 );
 
-                if( fFullChargeCapacity )
+                if( !fPollingOverridden && fFullChargeCapacity )
                 {
                     /*
                      * Conditionally set polling interval to 1 second if we're
@@ -635,7 +924,7 @@ bool AppleSmartBattery::transactionCompletion(
                      * i.e. we're doing an Inflow Disabled discharge
                      */
                     if( (((100*fRemainingCapacity) / fFullChargeCapacity ) < 5) 
-                        && ac_connected )
+                        && fACConnected )
                     {
                         setProperty("Quick Poll", true);
                         fPollingInterval = kQuickPollInterval;
@@ -645,8 +934,17 @@ bool AppleSmartBattery::transactionCompletion(
                     }
                 }
             } else {
+                fFullChargeCapacity == 0;
                 setMaxCapacity(0);
             }
+
+            if ( (0 == fFullChargeCapacity) )
+            {
+                // FullChargeCapacity == 0 is an absurd value.
+                logReadError(kErrorZeroCapacity, kBFullChargeCapacityCmd, transaction);
+
+                // We have already retried several times, so we accept this value and move on.
+            } 
 
             readWordAsync(kSMBusBatteryAddr, kBAverageCurrentCmd);
 
@@ -662,11 +960,11 @@ bool AppleSmartBattery::transactionCompletion(
                                 | transaction->receiveData[0];
 
                 setAmperage( my_signed_16 );
-                avg_current = my_signed_16;
+                fAvgCurrent = my_signed_16;
                 
             } else {
                 // Battery not present, or general error
-                avg_current = 0;
+                fAvgCurrent = 0;
                 setAmperage(0);
                 setTimeRemaining(0);
             }
@@ -686,45 +984,10 @@ bool AppleSmartBattery::transactionCompletion(
                 setVoltage(0);
             }
 
-            readWordAsync(kSMBusBatteryAddr, kBBatteryStatusCmd);
-
-            break;
-            
-        case kBBatteryStatusCmd:
-
-            if( kIOSMBusStatusOK == transaction_status ) 
-            {
-                my_unsigned_16 = (transaction->receiveData[1] << 8)
-                                | transaction->receiveData[0];
-
-                if ( my_unsigned_16 & kBFullyChargedStatusBit) {
-                    fully_charged = true;
-                } else {
-                    fully_charged = false;
-                }
-                
-                if ( my_unsigned_16 & kBFullyDischargedStatusBit)
-                {
-                    if(!fully_discharged) {
-                        fully_discharged = true;
-    
-                        // Immediately cancel AC Inflow disable
-                        fProvider->handleFullDischarge();
-                    }
-                } else {
-                    fully_discharged = false;
-                }
-                
-            } else {
-                fully_charged = false;
-            }
-            
-            setFullyCharged(fully_charged);
-
             readWordAsync(kSMBusBatteryAddr, kBMaxErrorCmd);
 
             break;
-            
+                        
         case kBMaxErrorCmd:
 
             if( kIOSMBusStatusOK == transaction_status ) 
@@ -764,7 +1027,7 @@ bool AppleSmartBattery::transactionCompletion(
 
                 setAverageTimeToEmpty( my_unsigned_16 );
                 
-                if(avg_current < 0) {
+                if(fAvgCurrent < 0) {
                     setTimeRemaining( my_unsigned_16 );
                 }                               
             } else {
@@ -786,7 +1049,7 @@ bool AppleSmartBattery::transactionCompletion(
 
                 setAverageTimeToFull( my_unsigned_16 );
 
-                if(avg_current > 0) {
+                if(fAvgCurrent > 0) {
                     setTimeRemaining( my_unsigned_16 );
                 }                               
             } else {
@@ -816,23 +1079,53 @@ bool AppleSmartBattery::transactionCompletion(
                                 (unsigned int)16);
             }
 
+            /* Cancel read-completion timeout; Successfully read battery state */
+            fBatteryReadAllTimer->cancelTimeout();
+
             rebuildLegacyIOBatteryInfo();
             
             updateStatus();
             
             fPollingNow = false;
 
-            // Re-arm 30 second timer only if the batteries are 
-            // not fully charged. No need to poll when fully charged.
-            if(  ( !ac_connected )
-              || ( !fully_charged && batt_present ) ) {
-                fPollTimer->setTimeoutMS( milliSecPollingTable[fPollingInterval] );
-                BattLog("SmartBattery: new timeout scheduled in %d msec\n",
-                                fPollingInterval);
+
+            /* fPollingInterval == 0 --> debug mode; never cease polling.
+             * Begin a new poll when the last one ended.
+             * Can consume 40-60% CPU on a 2Ghz MacBook Pro when set */            
+            if( fPollingOverridden && (fPollingInterval==0))
+            {
+                /* diabolical. Never stop polling battery state. */
+                pollBatteryState( kNewBatteryPath );
+                return true;
+            }
+            
+            /* Re-arm 30 second timer only if the batteries are 
+             * not fully charged. 
+             *  - No need to poll when fully charged.
+             *  - Always poll if fPollingOveridden
+             */
+            if( (fInitialPollCountdown > 0) 
+                || !fACConnected 
+                || (!fFullyCharged && fBatteryPresent)
+                || fPollingOverridden ) 
+            {
+                if( fInitialPollCountdown > 0) {
+                    fInitialPollCountdown--;
+                }
+            
+                if( !fPollingOverridden )
+                {
+                    /* Restart timer with standard polling interval */
+                    fPollTimer->setTimeoutMS( milliSecPollingTable[fPollingInterval] );
+                } else {
+                    /* restart timer with debug value */
+                    fPollTimer->setTimeoutMS( 1000 * fPollingInterval );
+                }
+                
             } else {
                 // We'll let the polling timer expire.
-                // Right now we're plugged into AC, we'll start the timer again
-                // when we get an alarm on AC unplug.
+                // Right now we're neither charging nor discharging. We'll start the timer again
+                // when we get an alarm on AC plug or unplug.
                 BattLog("SmartBattery: letting timeout expire.\n");
             }
 
@@ -845,10 +1138,18 @@ bool AppleSmartBattery::transactionCompletion(
     return true;
 }
 
+
 void AppleSmartBattery::clearBatteryState(bool do_update)
 {
     // Only clear out battery state; don't clear manager state like AC Power.
     // We just zero out the int and bool values, but remove the OSType values.
+
+    fRetryAttempts = 0;
+    fFullyDischarged = false;
+    fFullyCharged = false;
+    fBatteryPresent = false;
+    fACConnected = false;
+    fAvgCurrent = 0;
     
     setBatteryInstalled(false);
     setIsCharging(false);
@@ -865,24 +1166,15 @@ void AppleSmartBattery::clearBatteryState(bool do_update)
     properties->removeObject(serialKey);
     properties->removeObject(batteryInfoKey);
     
+    if(getProperty(kErrorPermanentFailure)) {
+        removeProperty(kErrorPermanentFailure);
+    }
+    
     rebuildLegacyIOBatteryInfo();
 
     if(do_update) {
         updateStatus();
     }
-}
-
-/******************************************************************************
- *  timer expiration handler
- ******************************************************************************/
-
-void AppleSmartBattery::timedOut(void)
-{
-    // Timer will be re-enabled from the battery polling routine.
-    // Timer will not be kicked off again if battery is plugged in and
-    // fully charged.
-    if( !fPollingNow )
-        pollBatteryState( kExistingBatteryPath );
 }
 
 
@@ -1076,5 +1368,4 @@ IOReturn AppleSmartBattery::readBlockAsync(
 
     return ret;
 }
-
 

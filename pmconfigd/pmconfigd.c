@@ -73,6 +73,14 @@
 #define kIOUPSDeviceKey                 "UPSDevice" 
 #endif
 
+
+#define kLOGOUT_INIT        CFSTR("com.apple.sessionmanager.allsessions.logoutInitiated")
+#define kRESTART_INIT       CFSTR("com.apple.sessionmanager.allsessions.restartInitiated")
+#define kSHUTDOWN_INIT      CFSTR("com.apple.sessionmanager.allsessions.shutdownInitiated")
+#define kLOGOUT_CONTINUED   CFSTR("com.apple.sessionmanager.allsessions.logoutContinued")
+#define kLOGOUT_CANCELLED   CFSTR("com.apple.sessionmanager.allsessions.logoutCancelled")
+#define kLW_QUIT_APPS       CFSTR("com.apple.sessionmanager.allsessions.logoutUserAppsTerminated")
+
 // Global keys
 static CFStringRef              gTZNotificationNameString   = NULL;
 static CFStringRef              EnergyPrefsKey              = NULL;
@@ -86,7 +94,6 @@ static int                      gClientGID                  = -1;
 
 CFMachPortRef                   serverMachPort              = NULL;
 
-
 // defined by MiG
 extern boolean_t powermanagement_server(mach_msg_header_t *, mach_msg_header_t *);
 
@@ -99,7 +106,8 @@ static void initializePowerSourceChangeNotification(void);
 static void initializeMIGServer(void);
 static void initializeInterestNotifications(void);
 static void initializeTimezoneChangeNotifications(void);
-static void intializeDisplaySleepNotifications(void);
+static void initializeDisplaySleepNotifications(void);
+static void initializeShutdownNotifications(void);
 
 static void SleepWakeCallback(void *,io_service_t, natural_t, void *);
 static void ESPrefsHaveChanged(SCDynamicStoreRef, CFArrayRef, void *);
@@ -110,6 +118,11 @@ static void BatteryInterest(void *, io_service_t, natural_t, void *);
 static void PMUInterest(void *, io_service_t, natural_t, void *);
 extern void PowerSourcesHaveChanged(void *info);
 static void broadcastGMTOffset(void);
+static void lwShutdownCallback( 
+                CFNotificationCenterRef center, 
+                void *observer, CFStringRef name, 
+                const void *object, CFDictionaryRef userInfo);
+
 
 static void timeZoneChangedCallBack(
                 CFNotificationCenterRef center, 
@@ -172,7 +185,7 @@ void prime()
  */
 void load(CFBundleRef bundle, Boolean bundleVerbose)
 {
-    IONotificationPortRef           notify;    
+    IONotificationPortRef           notify;
     io_object_t                     anIterator;
 
     // Install notification on Power Source changes
@@ -191,8 +204,11 @@ void load(CFBundleRef bundle, Boolean bundleVerbose)
     initializeTimezoneChangeNotifications();
     
     // Register for display dim/undim notifications
-    intializeDisplaySleepNotifications();
+    initializeDisplaySleepNotifications();
     
+    // Register for loginwindow's shutdown/restart panel initiated notifications
+    initializeShutdownNotifications();
+  
     // Register for SystemPower notifications
     _pm_ack_port = IORegisterForSystemPower (0, &notify, SleepWakeCallback, &anIterator);
     if ( _pm_ack_port != MACH_PORT_NULL ) {
@@ -428,12 +444,10 @@ timeZoneChangedCallBack(
     const void *object, 
     CFDictionaryRef userInfo)
 {
-
     if( CFEqual(notificationName, gTZNotificationNameString) )
     {
         broadcastGMTOffset();
     }
-
 }
 
 
@@ -476,6 +490,42 @@ broadcastGMTOffset(void)
 exit:
     if(tzr) CFRelease(tzr);
     if(n) CFRelease(n);
+    return;
+}
+
+/* lwShutdownCallback
+ *
+ *
+ *
+ * loginwindow shutdown handler
+ *
+ */ 
+static void lwShutdownCallback( 
+                CFNotificationCenterRef center, 
+                void *observer, CFStringRef name, 
+                const void *object, CFDictionaryRef userInfo)
+{
+    static bool amidst_shutdown = false;
+
+    if( amidst_shutdown && CFEqual( name, kLOGOUT_CANCELLED ))
+    {
+        amidst_shutdown = false;
+        
+        // Re-enable sleep because shutdown or restart was cancelled
+        _setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanFalse);    
+    } else if( amidst_shutdown && CFEqual( name, kLW_QUIT_APPS ))
+    {
+        // We are past the point of (hopefully) no return, all user apps have 
+        // been quit on our way to shutdown/restart.
+        _setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanTrue);
+    } else if( CFEqual( name, kRESTART_INIT)
+             || CFEqual( name, kSHUTDOWN_INIT) )
+    {
+        // shutdown or restart begins
+        amidst_shutdown = true;
+    }
+
+
     return;
 }
 
@@ -533,16 +583,6 @@ initializeESPrefsDynamicStore(void)
                                 CFSTR(kIOPMPrefsPath), 
                                 kSCPreferencesKeyApply);
  
-/*    EnergyPrefsKey = SCPreferencesPathKeyCreate(
-                                    kCFAllocatorDefault, 
-                                    @"%@:%@:%@",
-                                    
-                                    kSCPreferencesKeyApply,
-                                    CFSTR(kIOPMPrefsPath) );
-
-*/
-    CFShow(EnergyPrefsKey);
-
     if(EnergyPrefsKey) 
     CFArrayAppendValue(watched_keys, EnergyPrefsKey);
 
@@ -984,7 +1024,7 @@ initializeTimezoneChangeNotifications(void)
  * clients when display sleep kicks in. 
  */
 static void
-intializeDisplaySleepNotifications(void)
+initializeDisplaySleepNotifications(void)
 {
     IONotificationPortRef       note_port = MACH_PORT_NULL;
     CFRunLoopSourceRef          dimSrc = NULL;
@@ -1015,6 +1055,42 @@ exit:
     // Do not release dimSrc because it's 'owned' by note_port, and both
     // must be kept around to receive this notification
     if(MACH_PORT_NULL != display_wrangler) IOObjectRelease(display_wrangler);
+}
+
+static void 
+initializeShutdownNotifications(void)
+{
+    int i;
+    CFNotificationCenterRef     note_center = NULL;
+    CFStringRef                 eventNames[] = 
+        {
+            kRESTART_INIT,
+            kSHUTDOWN_INIT,
+            kLOGOUT_CANCELLED,
+            kLW_QUIT_APPS
+        };
+
+    // Tell the kernel that we are NOT shutting down at the moment, since
+    // configd is just launching now.
+    // Why: if configd crashed with "System Shutdown" == kCFbooleanTrue, reset
+    // it now as the situation may no longer apply.
+    _setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanFalse);
+
+    note_center = CFNotificationCenterGetDistributedCenter();
+    if(!note_center) {
+        return;
+    }
+
+    for(i=0; i< (sizeof(eventNames)/sizeof(CFStringRef)); i++)
+    {
+        CFNotificationCenterAddObserver( note_center,
+                NULL, /* observer */
+                lwShutdownCallback, /* callback */
+                eventNames[i], /* name */
+                NULL, /* object */
+                0); /* SuspensionBehavior */
+    }
+        
 }
 
 // use 'make' to build standalone debuggable executable 'pm'

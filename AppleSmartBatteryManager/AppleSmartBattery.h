@@ -31,6 +31,8 @@
 #include "AppleSmartBatteryCommands.h"
 #include "AppleSmartBatteryManager.h"
 
+#define kBatteryPollingDebugKey     "BatteryPollingPeriodOverride"
+
 class AppleSmartBatteryManager;
 
 class AppleSmartBattery : public IOPMPowerSource {
@@ -40,15 +42,28 @@ protected:
     AppleSmartBatteryManager    *fProvider;
     IOWorkLoop                  *fWorkLoop;
     IOTimerEventSource          *fPollTimer;
+    IOTimerEventSource          *fBatteryReadAllTimer;
     bool                        fCancelPolling;
     bool                        fPollingNow;
     IOSMBusTransaction          fTransaction;
-    int                         fMachinePath;
+    uint16_t                    fMachinePath;
     uint32_t                    fPollingInterval;
+    bool                        fPollingOverridden;
+    bool                        fRebootPolling;
     bool                        fInflowDisabled;
     bool                        fChargeInhibited;
     uint16_t                    fRemainingCapacity;
     uint16_t                    fFullChargeCapacity;
+    
+    uint8_t                     fInitialPollCountdown;
+    uint8_t                     fIncompleteReadRetries;
+    int                         fRetryAttempts;
+    
+    bool                        fFullyDischarged;
+    bool                        fFullyCharged;
+    bool                        fBatteryPresent;
+    int                         fACConnected;
+    int                         fAvgCurrent;
 
     // Accessor for MaxError reading
     // Percent error in MaxCapacity reading
@@ -85,7 +100,7 @@ public:
     void    setPollingInterval(int milliSeconds);
 
     bool    pollBatteryState(int path = 0);
-
+    
     IOReturn setPowerState(unsigned long which, IOService *whom);
 
     void    handleBatteryInserted(void);
@@ -96,11 +111,16 @@ public:
 
     void    handleChargeInhibited(bool charge_state);
 
-private:
+protected:
+    void    logReadError( const char *error_type, 
+                          uint16_t additional_error,
+                          IOSMBusTransaction *t);
 
     void    clearBatteryState(bool do_update);
 
-    void    timedOut(void);
+    void    pollingTimeOut(void);
+    
+    void    incompleteReadTimeOut(void);
 
     void    rebuildLegacyIOBatteryInfo(void);
 

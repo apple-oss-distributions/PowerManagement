@@ -128,6 +128,7 @@
 
 // special
 #define ARG_BOOT            "boot"
+#define ARG_UNBOOT          "unboot"
 #define ARG_FORCE           "force"
 
 // return values for parseArgs
@@ -2168,7 +2169,21 @@ static int parseArgs(int argc,
             {
                 // Tell kernel power management that bootup is complete
                 kr = setRootDomainProperty(CFSTR("System Boot Complete"), kCFBooleanTrue);
-                if(kr != kIOReturnSuccess) {
+                if(kr == kIOReturnSuccess) {
+                    printf("Setting boot completed.\n");
+                } else {
+                    fprintf(stderr, "pmset: Error 0x%x setting boot property\n", kr);
+                    fflush(stderr);
+                }
+
+                i++;
+            } else if(0 == strcmp(argv[i], ARG_UNBOOT))
+            {
+                // Tell kernel power management that bootup is complete
+                kr = setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanTrue);
+                if(kr == kIOReturnSuccess) {
+                    printf("Setting shutdown true.\n");
+                } else {
                     fprintf(stderr, "pmset: Error 0x%x setting boot property\n", kr);
                     fflush(stderr);
                 }
