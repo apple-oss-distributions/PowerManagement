@@ -66,7 +66,9 @@ static const int                _delayedRemovePowerMinutes = 3;
 static const int                _delayBeforeStartupMinutes = 4;
 static CFAbsoluteTime           _switchedToUPSPowerTime = 0.0;
 static threshold_struct        *_thresh;
+#if HAVE_CF_USER_NOTIFICATION
 static CFUserNotificationRef    _UPSAlert = NULL;
+#endif
 
 // Local functions defined below
 static  int         _upsSupports(CFNumberRef whichUPS, CFStringRef  command);
@@ -155,11 +157,13 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
         isPresent = isA_CFBoolean(CFDictionaryGetValue(ups_info, CFSTR(kIOPSIsPresentKey)));
         if(!isPresent || !CFBooleanGetValue(isPresent))
         {
+#if HAVE_CF_USER_NOTIFICATION
             if(_UPSAlert)
             {
                 CFUserNotificationCancel(_UPSAlert);
                 _UPSAlert = 0;
             }
+#endif
             // If UPS isn't active or connected we shouldn't base policy decisions on it
             goto _exit_PowerSourcesHaveChanged_;
         }
@@ -168,14 +172,14 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
         power_source = isA_CFString(CFDictionaryGetValue(ups_info, CFSTR(kIOPSPowerSourceStateKey)));
         if(!power_source || !CFEqual(power_source, CFSTR(kIOPSBatteryPowerValue)))
         {
+#if HAVE_CF_USER_NOTIFICATION
             // Running off of AC Power
             if(_UPSAlert)
             {
                 CFUserNotificationCancel(_UPSAlert);
                 _UPSAlert = 0;
-                syslog(LOG_INFO, "PM UPS Alert: External power has been restored to system.\n");
             }
-                
+#endif                
             // we have to be draining the internal battery to do a shutdown, so we'll just exit from here.
             goto _exit_PowerSourcesHaveChanged_;
         }
@@ -191,8 +195,10 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
                 _reEvaluatePowerSourcesLater(5 + (60*_thresh->haltafter[kHaltValue]));
             }
             
+#if HAVE_CF_USER_NOTIFICATION
             if(!_UPSAlert) _UPSAlert = _showUPSWarning();
-            syslog(LOG_INFO, "PM UPS Alert: External power has been removed; Running off UPS battery.\n");
+#endif 
+
         }
         
         // TODO: switch this battery-present check for the IOKit 
@@ -230,7 +236,6 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
     
                 if( _thresh->haltpercent[kHaltEnabled] ) {
                     if( percent_remaining <= _thresh->haltpercent[kHaltValue] ) {
-                        syslog(LOG_INFO, "PM UPS Alert: Shutting down at battery level %d\%.\n", minutes_remaining);
                         _doPowerEmergencyShutdown(ups_id);
                     }
                 }
@@ -245,7 +250,6 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
             {
                 if( _thresh->haltremain[kHaltEnabled] ) {
                     if( minutes_remaining <= _thresh->haltremain[kHaltValue] ) {
-                        syslog(LOG_INFO, "PM UPS Alert: Shutting down with %d minutes remaining on UPS.\n", minutes_remaining);
                         _doPowerEmergencyShutdown(ups_id);
                     }
                 }
@@ -255,7 +259,6 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
         // Determine how long we've been running on UPS power
         if( _thresh->haltafter[kHaltEnabled] ) {
             if(_minutesSpentOnUPSPower() >= _thresh->haltafter[kHaltValue]) {
-                syslog(LOG_INFO, "PM UPS Alert: Shutting down after running on UPS for %d minutes.\n", _minutesSpentOnUPSPower());
                 _doPowerEmergencyShutdown(ups_id);
             }
         }
@@ -263,11 +266,13 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
     } else {
         // No "active UPS" detected. 
         // One could have just disappeared - if we're showing an alert, clear it.
+#if HAVE_CF_USER_NOTIFICATION
         if(_UPSAlert)
         {
             CFUserNotificationCancel(_UPSAlert);
             _UPSAlert = 0;
         }
+#endif
     }
     
     // exit point

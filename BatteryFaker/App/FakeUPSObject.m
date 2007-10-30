@@ -22,7 +22,7 @@ bool IOUPSMIGServerIsRunning(
     kern_return_t kern_result = KERN_SUCCESS;
     mach_port_t   bootstrap_port;
 
-    if (bootstrap_port_ref && (*bootstrap_port_ref != PORT_NULL)) {
+    if (bootstrap_port_ref && (*bootstrap_port_ref != MACH_PORT_NULL)) {
         bootstrap_port = *bootstrap_port_ref;
     } else {
         /* Get the bootstrap server port */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2007 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -19,14 +19,6 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
-/*
- * Copyright (c) 2001 Apple Computer, Inc.  All rights reserved. 
- *
- * HISTORY
- *
- * 18-Dec-01 ebold created
- *
- */
  
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -34,6 +26,7 @@
 #include <SystemConfiguration/SCValidation.h>
 #include <SystemConfiguration/SCPreferencesPrivate.h>
 #include <SystemConfiguration/SCDynamicStorePrivate.h>
+#include <SystemConfiguration/SCPreferences.h>
 #include <SystemConfiguration/SCDynamicStoreCopySpecificPrivate.h>
 #include <SystemConfiguration/SCDPlugin.h>
 
@@ -51,9 +44,8 @@
 #include <grp.h>
 #include <pwd.h>
 #include <mach/mach.h>
-#include <mach/mach_host.h>
-#include <mach/mach_error.h>
 #include <servers/bootstrap.h>
+#include <notify.h> 
 
 #include "powermanagementServer.h" // mig generated
 
@@ -64,6 +56,7 @@
 #include "RepeatingAutoWake.h"
 #include "SetActive.h"
 #include "PrivateLib.h"
+#include "TTYKeepAwake.h"
 
 #define kIOPMAppName        "Power Management configd plugin"
 #define kIOPMPrefsPath        "com.apple.PowerManagement.xml"
@@ -73,24 +66,43 @@
 #define kIOUPSDeviceKey                 "UPSDevice" 
 #endif
 
+/*
+ * BSD notifications from loginwindow indicating shutdown
+ */
+// kLWShutdownInitiated
+//   User clicked shutdown: may be aborted later
+#define kLWShutdowntInitiated    "com.apple.loginwindow.shutdownInitiated"
 
-#define kLOGOUT_INIT        CFSTR("com.apple.sessionmanager.allsessions.logoutInitiated")
-#define kRESTART_INIT       CFSTR("com.apple.sessionmanager.allsessions.restartInitiated")
-#define kSHUTDOWN_INIT      CFSTR("com.apple.sessionmanager.allsessions.shutdownInitiated")
-#define kLOGOUT_CONTINUED   CFSTR("com.apple.sessionmanager.allsessions.logoutContinued")
-#define kLOGOUT_CANCELLED   CFSTR("com.apple.sessionmanager.allsessions.logoutCancelled")
-#define kLW_QUIT_APPS       CFSTR("com.apple.sessionmanager.allsessions.logoutUserAppsTerminated")
+// kLWRestartInitiated
+//   User clicked restart: may be aborted later
+#define kLWRestartInitiated     "com.apple.loginwindow.restartinitiated"
+
+// kLWLogoutCancelled
+//   A previously initiated shutdown, restart, or logout, has been cancelled.
+#define kLWLogoutCancelled      "com.apple.loginwindow.logoutcancelled"
+
+// kLWLogoutPointOfNoReturn
+//   A previously initiated shutdown, restart, or logout has succeeded, and is 
+//   no longer abortable by anyone. Point of no return!
+#define kLWLogoutPointOfNoReturn    "com.apple.loginwindow.logoutNoReturn"
+
 
 // Global keys
 static CFStringRef              gTZNotificationNameString   = NULL;
-static CFStringRef              EnergyPrefsKey              = NULL;
-static CFStringRef              AutoWakePrefsKey            = NULL;
+
+static SCPreferencesRef         gESPreferences              = NULL;
+static SCPreferencesRef         gAutoWakePreferences        = NULL;
 
 static io_connect_t             _pm_ack_port                = 0;
 static io_iterator_t            _ups_added_noteref          = 0;
 static int                      _alreadyRunningIOUPSD       = 0;
 static int                      gClientUID                  = -1;
 static int                      gClientGID                  = -1;
+
+static int                      gLWShutdownNotificationToken        = 0;
+static int                      gLWRestartNotificationToken         = 0;
+static int                      gLWLogoutCancelNotificationToken    = 0;
+static int                      gLWLogoutPointOfNoReturnNotificationToken = 0;
 
 CFMachPortRef                   serverMachPort              = NULL;
 
@@ -108,21 +120,29 @@ static void initializeInterestNotifications(void);
 static void initializeTimezoneChangeNotifications(void);
 static void initializeDisplaySleepNotifications(void);
 static void initializeShutdownNotifications(void);
+static void initializeRootDomainInterestNotifications(void);
 
 static void SleepWakeCallback(void *,io_service_t, natural_t, void *);
-static void ESPrefsHaveChanged(SCDynamicStoreRef, CFArrayRef, void *);
+static void ESPrefsHaveChanged(
+                SCPreferencesRef prefs,
+                SCPreferencesNotification notificationType,
+                void *info);
 static void _ioupsd_exited(pid_t, int, struct rusage *, void *);
 static void UPSDeviceAdded(void *, io_iterator_t);
 static void BatteryMatch(void *, io_iterator_t);
 static void BatteryInterest(void *, io_service_t, natural_t, void *);
+#if __ppc__
 static void PMUInterest(void *, io_service_t, natural_t, void *);
+#endif
+static void RootDomainInterest(void *, io_service_t, natural_t, void *);
 extern void PowerSourcesHaveChanged(void *info);
 static void broadcastGMTOffset(void);
-static void lwShutdownCallback( 
-                CFNotificationCenterRef center, 
-                void *observer, CFStringRef name, 
-                const void *object, CFDictionaryRef userInfo);
 
+static void lwShutdownCallback( 
+                CFMachPortRef port,
+                void *msg,
+                CFIndex size,
+                void *info);
 
 static void timeZoneChangedCallBack(
                 CFNotificationCenterRef center, 
@@ -160,21 +180,15 @@ kern_return_t _io_pm_set_active_profile(
  */
 void prime()
 {    
-    // Initialize battery averaging code
+    // Initialize everything.
+    
     BatteryTimeRemaining_prime();
-    
-    // Initialize PMSettings code
     PMSettings_prime();
-    
-    // Initialize PSLowPower code
     PSLowPower_prime();
-
-    // Initialzie AutoWake code
     AutoWake_prime();
     RepeatingAutoWake_prime();
-    
-    // initialize Assertions code
     PMAssertions_prime();
+    TTYKeepAwake_prime();
         
     return;
 }
@@ -209,6 +223,9 @@ void load(CFBundleRef bundle, Boolean bundleVerbose)
     // Register for loginwindow's shutdown/restart panel initiated notifications
     initializeShutdownNotifications();
   
+    // Register for interest notifications when PM features are published or removed
+    initializeRootDomainInterestNotifications();
+    
     // Register for SystemPower notifications
     _pm_ack_port = IORegisterForSystemPower (0, &notify, SleepWakeCallback, &anIterator);
     if ( _pm_ack_port != MACH_PORT_NULL ) {
@@ -225,6 +242,7 @@ void load(CFBundleRef bundle, Boolean bundleVerbose)
 
 
 
+#if __ppc__
 /* PMUInterest
  *
  * Receives and distributes messages from the PMU driver
@@ -238,7 +256,7 @@ PMUInterest(void *refcon, io_service_t service, natural_t messageType, void *arg
        (kIOPMUMessageLegacyAutoPower == messageType) )
         AutoWakePMUInterestNotification(messageType, (UInt32)arg);
 }
-
+#endif
 
 static void BatteryMatch(
     void *refcon, 
@@ -307,6 +325,8 @@ static void BatteryInterest(
 static void
 SleepWakeCallback(void * port,io_service_t y,natural_t messageType,void * messageArgument)
 {
+    bool cancel_sleep = false;
+
     // Notify BatteryTimeRemaining
     BatteryTimeRemainingSleepWakeNotification(messageType);
 
@@ -317,11 +337,21 @@ SleepWakeCallback(void * port,io_service_t y,natural_t messageType,void * messag
     AutoWakeSleepWakeNotification(messageType);
     RepeatingAutoWakeSleepWakeNotification(messageType);
 
+    // Notify & potentially cancel sleep by open ssh connections
+    cancel_sleep = TTYKeepAwakeSleepWakeNotification(messageType);
+
     switch ( messageType ) {
     case kIOMessageSystemWillSleep:
         broadcastGMTOffset(); // tell clients what our timezone offset is
-    case kIOMessageCanSystemSleep:
         IOAllowPowerChange(_pm_ack_port, (long)messageArgument);
+        break;
+    case kIOMessageCanSystemSleep:
+        if ( cancel_sleep )
+        {
+            IOCancelPowerChange(_pm_ack_port, (long)messageArgument);
+        } else {
+            IOAllowPowerChange(_pm_ack_port, (long)messageArgument);
+        }
         break;
         
     case kIOMessageSystemHasPoweredOn:
@@ -336,20 +366,25 @@ SleepWakeCallback(void * port,io_service_t y,natural_t messageType,void * messag
  * from disk and transmit the new settings to the kernel.
  */
 static void 
-ESPrefsHaveChanged(SCDynamicStoreRef store, CFArrayRef changedKeys, void *info) 
+ESPrefsHaveChanged(
+    SCPreferencesRef prefs,
+    SCPreferencesNotification notificationType,
+    void *info)
 {
-    CFRange   key_range = CFRangeMake(0, CFArrayGetCount(changedKeys));
+    if ((kSCPreferencesNotificationCommit & notificationType) == 0)
+        return;
 
-    if(CFArrayContainsValue(changedKeys, key_range, EnergyPrefsKey))
+    if (gESPreferences == prefs)
     {
-        // Tell PMSettings that the prefs file has changed
+        // Tell ES Prefs listeners that the prefs have changed
         PMSettingsPrefsHaveChanged();
         PSLowPowerPrefsHaveChanged();
+        TTYKeepAwakePrefsHaveChanged();
     }
 
-    if(CFArrayContainsValue(changedKeys, key_range, AutoWakePrefsKey))
+    if (gAutoWakePreferences == prefs)
     {
-        // Tell AutoWake that the prefs file has changed
+        // Tell AutoWake listeners that the prefs have changed
         AutoWakePrefsHaveChanged();
         RepeatingAutoWakePrefsHaveChanged();
     }
@@ -501,31 +536,38 @@ exit:
  *
  */ 
 static void lwShutdownCallback( 
-                CFNotificationCenterRef center, 
-                void *observer, CFStringRef name, 
-                const void *object, CFDictionaryRef userInfo)
+    CFMachPortRef port,
+    void *msg,
+    CFIndex size,
+    void *info)
 {
+    mach_msg_header_t   *header = (mach_msg_header_t *)msg;
     static bool amidst_shutdown = false;
 
-    if( amidst_shutdown && CFEqual( name, kLOGOUT_CANCELLED ))
+    if (header->msgh_id == gLWShutdownNotificationToken) 
     {
-        amidst_shutdown = false;
-        
-        // Re-enable sleep because shutdown or restart was cancelled
-        _setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanFalse);    
-    } else if( amidst_shutdown && CFEqual( name, kLW_QUIT_APPS ))
-    {
-        // We are past the point of (hopefully) no return, all user apps have 
-        // been quit on our way to shutdown/restart.
-        _setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanTrue);
-    } else if( CFEqual( name, kRESTART_INIT)
-             || CFEqual( name, kSHUTDOWN_INIT) )
-    {
-        // shutdown or restart begins
+        // Loginwindow put a shutdown confirm panel up on screen
+        // The user has not necessarily even clicked on it yet
         amidst_shutdown = true;
+    } else if (header->msgh_id == gLWRestartNotificationToken) 
+    {
+        // Loginwindow put a restart confirm panel up on screen
+        // The user has not necessarily even clicked on it yet
+        amidst_shutdown = true;
+    } else if (header->msgh_id == gLWLogoutCancelNotificationToken) 
+    {
+        // Whatever shutdown, restart, or logout that was in progress has been cancelled.
+        amidst_shutdown = false;
+    } else if (amidst_shutdown 
+            && (header->msgh_id == gLWLogoutPointOfNoReturnNotificationToken))
+    {
+        // Whatever shutdown or restart that was in progress has succeeded.
+        // All apps are quit, there's no more user input required. We will
+        // hereby disable sleep for the remainder of time spent shutting down
+        // this machine.
+
+        _setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanTrue);
     }
-
-
     return;
 }
 
@@ -567,44 +609,42 @@ displayPowerStateChange(void *ref, io_service_t service, natural_t messageType, 
 static void
 initializeESPrefsDynamicStore(void)
 {
-    CFRunLoopSourceRef          CFrls = NULL;
-    CFMutableArrayRef           watched_keys = NULL;
-    SCDynamicStoreRef           energyDS;
+    gESPreferences = SCPreferencesCreate(
+                    kCFAllocatorDefault,
+                    CFSTR("com.apple.configd.powermanagement"),
+                    CFSTR(kIOPMPrefsPath));
 
-    watched_keys = CFArrayCreateMutable(0, 0, &kCFTypeArrayCallBacks);
-    if(!watched_keys) return;
+    gAutoWakePreferences = SCPreferencesCreate(
+                    kCFAllocatorDefault,
+                    CFSTR("com.apple.configd.powermanagement"),
+                    CFSTR(kIOPMAutoWakePrefsPath));
+
+    if (gESPreferences)
+    {
+        SCPreferencesSetCallback(
+                    gESPreferences,
+                    (SCPreferencesCallBack)ESPrefsHaveChanged,
+                    (SCPreferencesContext *)NULL);
+
+        SCPreferencesScheduleWithRunLoop(
+                    gESPreferences,
+                    CFRunLoopGetCurrent(),
+                    kCFRunLoopDefaultMode);
+    }
     
-    energyDS = SCDynamicStoreCreate(NULL, CFSTR(kIOPMAppName), &ESPrefsHaveChanged, NULL);
-    if(!energyDS) return;
+    if (gAutoWakePreferences)
+    {
+        SCPreferencesSetCallback(
+                    gAutoWakePreferences,
+                    (SCPreferencesCallBack)ESPrefsHaveChanged,
+                    (SCPreferencesContext *)NULL);
 
-    // Setup notification for changes in Energy Saver prefences
-    EnergyPrefsKey = SCDynamicStoreKeyCreatePreferences(
-                                NULL, 
-                                CFSTR(kIOPMPrefsPath), 
-                                kSCPreferencesKeyApply);
- 
-    if(EnergyPrefsKey) 
-    CFArrayAppendValue(watched_keys, EnergyPrefsKey);
-
-    // Setup notification for changes in AutoWake prefences
-    AutoWakePrefsKey = SCDynamicStoreKeyCreatePreferences(
-                NULL, 
-                CFSTR(kIOPMAutoWakePrefsPath), 
-                kSCPreferencesKeyCommit);
-    if(AutoWakePrefsKey) 
-        CFArrayAppendValue(watched_keys, AutoWakePrefsKey);
-
-    SCDynamicStoreSetNotificationKeys(energyDS, watched_keys, NULL);
-
-    // Create and add RunLoopSource
-    CFrls = SCDynamicStoreCreateRunLoopSource(NULL, energyDS, 0);
-    if(CFrls) {
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), CFrls, kCFRunLoopDefaultMode);    
-        CFRelease(CFrls);
+        SCPreferencesScheduleWithRunLoop(
+                    gAutoWakePreferences,
+                    CFRunLoopGetCurrent(),
+                    kCFRunLoopDefaultMode);
     }
 
-    CFRelease(watched_keys);
-    CFRelease(energyDS);
     return;
 }
 
@@ -773,6 +813,40 @@ mig_server_callback(CFMachPortRef port, void *msg, CFIndex size, void *info)
     CFAllocatorDeallocate(NULL, bufReply);
 }
 
+kern_return_t _io_pm_force_active_settings(
+    mach_port_t                 server,
+    vm_offset_t                 settings_ptr,
+    mach_msg_type_number_t      settings_len,
+    int                         *result)
+{
+    void                    *settings_buf = (void *)settings_ptr;
+    CFDictionaryRef         force_settings = NULL;
+
+    /* requires root */
+    if(0 != gClientUID) {
+        *result = kIOReturnNotPrivileged;
+    }
+    
+    force_settings = (CFDictionaryRef)IOCFUnserialize(settings_buf, 0, 0, 0);
+
+    if(isA_CFDictionary(force_settings)) 
+    {
+        *result = _activateForcedSettings(force_settings);
+    } else {
+        *result = kIOReturnBadArgument;
+    }
+    
+    if(force_settings) 
+    {
+        CFRelease(force_settings);
+    }
+
+    // deallocate client's memory
+    vm_deallocate(mach_task_self(), (vm_address_t)settings_ptr, settings_len);
+
+    return KERN_SUCCESS;
+}
+
 kern_return_t _io_pm_set_active_profile(
                 mach_port_t         server,
                 vm_offset_t         profiles_ptr,
@@ -889,7 +963,6 @@ initializeMIGServer(void)
       case BOOTSTRAP_SERVICE_ACTIVE:
         break;
       default:
-        //syslog(LOG_INFO, "pmconfigd exit: undefined mig error");
         break;
     }
 
@@ -924,6 +997,7 @@ initializeInterestNotifications()
     if(!rlser) goto finish;
     CFRunLoopAddSource(CFRunLoopGetCurrent(), rlser, kCFRunLoopDefaultMode);
 
+#if __ppc__
     /* PMU */
     pmu_service_ref = IOServiceGetMatchingService(0, IOServiceNameMatching("ApplePMU"));
     if(!pmu_service_ref) goto battery;
@@ -932,6 +1006,7 @@ initializeInterestNotifications()
                                 kIOGeneralInterest, PMUInterest,
                                 0, &notification_ref);
     if(kIOReturnSuccess != ret) goto battery;
+#endif /* __ppc__ */
 
 battery:
 
@@ -1032,7 +1107,8 @@ initializeDisplaySleepNotifications(void)
     io_object_t                 dimming_notification_object = MACH_PORT_NULL;
     IOReturn                    ret;
 
-    display_wrangler = IOServiceGetMatchingService(MACH_PORT_NULL, IOServiceNameMatching("IODisplayWrangler"));
+    display_wrangler = IOServiceGetMatchingService(MACH_PORT_NULL, 
+                                            IOServiceNameMatching("IODisplayWrangler"));
     if(!display_wrangler) return;
     
     note_port = IONotificationPortCreate(MACH_PORT_NULL);
@@ -1041,11 +1117,11 @@ initializeDisplaySleepNotifications(void)
     ret = IOServiceAddInterestNotification(note_port, display_wrangler, 
                 kIOGeneralInterest, displayPowerStateChange,
                 NULL, &dimming_notification_object);
-    if(ret != kIOReturnSuccess) goto exit;
+    if (ret != kIOReturnSuccess) goto exit;
     
     dimSrc = IONotificationPortGetRunLoopSource(note_port);
     
-    if(dimSrc)
+    if (dimSrc)
     {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), dimSrc, kCFRunLoopDefaultMode);
     }
@@ -1060,15 +1136,10 @@ exit:
 static void 
 initializeShutdownNotifications(void)
 {
-    int i;
-    CFNotificationCenterRef     note_center = NULL;
-    CFStringRef                 eventNames[] = 
-        {
-            kRESTART_INIT,
-            kSHUTDOWN_INIT,
-            kLOGOUT_CANCELLED,
-            kLW_QUIT_APPS
-        };
+    CFMachPortRef       gNotifyMachPort = NULL;
+    CFRunLoopSourceRef  gNotifyMachPortRLS = NULL;
+    mach_port_t         our_port = MACH_PORT_NULL;
+    int                 notify_return = NOTIFY_STATUS_OK;
 
     // Tell the kernel that we are NOT shutting down at the moment, since
     // configd is just launching now.
@@ -1076,21 +1147,106 @@ initializeShutdownNotifications(void)
     // it now as the situation may no longer apply.
     _setRootDomainProperty(CFSTR("System Shutdown"), kCFBooleanFalse);
 
-    note_center = CFNotificationCenterGetDistributedCenter();
-    if(!note_center) {
-        return;
-    }
+    /* * * * * * * * * * * * * */
+    
+    notify_return = notify_register_mach_port( 
+                        kLWShutdowntInitiated, 
+                        &our_port, 
+                        0, /* flags */ 
+                        &gLWShutdownNotificationToken);
 
-    for(i=0; i< (sizeof(eventNames)/sizeof(CFStringRef)); i++)
+    notify_return = notify_register_mach_port( 
+                        kLWRestartInitiated, 
+                        &our_port, 
+                        NOTIFY_REUSE, /* flags */ 
+                        &gLWRestartNotificationToken);
+
+    notify_return = notify_register_mach_port( 
+                        kLWLogoutCancelled, 
+                        &our_port, 
+                        NOTIFY_REUSE, /* flags */ 
+                        &gLWLogoutCancelNotificationToken);
+
+    notify_return = notify_register_mach_port( 
+                        kLWLogoutPointOfNoReturn, 
+                        &our_port, 
+                        NOTIFY_REUSE, /* flags */ 
+                        &gLWLogoutPointOfNoReturnNotificationToken);
+
+    /* * * * * * * * * * * * * */
+
+    gNotifyMachPort = CFMachPortCreateWithPort(
+                                kCFAllocatorDefault,
+                                our_port,
+                                lwShutdownCallback,
+                                NULL,  /* context */
+                                NULL); /* &shouldFreeInfo */
+    if (!gNotifyMachPort)
+        return;
+    
+    // Create RLS for mach port
+    gNotifyMachPortRLS = CFMachPortCreateRunLoopSource(
+                                        kCFAllocatorDefault,
+                                        gNotifyMachPort,
+                                        0); /* order */
+    if (!gNotifyMachPortRLS)
+        return;
+
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), 
+            gNotifyMachPortRLS, kCFRunLoopDefaultMode);
+}
+
+static void 
+RootDomainInterest(
+    void *refcon, 
+    io_service_t root_domain, 
+    natural_t messageType, 
+    void *messageArgument)
+{
+    if (messageType == kIOPMMessageFeatureChange)
     {
-        CFNotificationCenterAddObserver( note_center,
-                NULL, /* observer */
-                lwShutdownCallback, /* callback */
-                eventNames[i], /* name */
-                NULL, /* object */
-                0); /* SuspensionBehavior */
+        // Let PMSettings code know that some settings may have been
+        // added or removed.
+    
+        PMSettingsSupportedPrefsListHasChanged();
     }
+}
+
+static void 
+initializeRootDomainInterestNotifications(void)
+{
+    IONotificationPortRef       note_port = MACH_PORT_NULL;
+    CFRunLoopSourceRef          runLoopSrc = NULL;
+    io_service_t                root_domain = MACH_PORT_NULL;
+    io_object_t                 notification_object = MACH_PORT_NULL;
+    IOReturn                    ret;
+
+    root_domain = IORegistryEntryFromPath(kIOMasterPortDefault, 
+                            kIOPowerPlane ":/IOPowerConnection/IOPMrootDomain");
+
+    if(!root_domain) return;
         
+    note_port = IONotificationPortCreate(MACH_PORT_NULL);
+    if(!note_port) goto exit;
+    
+    ret = IOServiceAddInterestNotification(note_port, root_domain, 
+                kIOGeneralInterest, RootDomainInterest,
+                NULL, &notification_object);
+    if (ret != kIOReturnSuccess) goto exit;
+    
+    runLoopSrc = IONotificationPortGetRunLoopSource(note_port);
+    
+    if (runLoopSrc)
+    {
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSrc, kCFRunLoopDefaultMode);
+        CFRelease(runLoopSrc);
+    }
+    
+exit:
+    // Do not release notification_object, would uninstall notification
+    // Do not release runLoopSrc because it's 'owned' by note_port, and both
+    // must be kept around to receive this notification
+    if(MACH_PORT_NULL != root_domain) IOObjectRelease(root_domain);
 }
 
 // use 'make' to build standalone debuggable executable 'pm'

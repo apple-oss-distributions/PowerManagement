@@ -56,16 +56,20 @@
 #define kIOPMAppName        "Power Management configd plugin"
 #define kIOPMPrefsPath        "com.apple.PowerManagement.xml"
 
-#define kAssertionsArraySize        5
+#define kMaxTaskAssertions          64
 #define kIOPMTaskPortKey            CFSTR("task")
 #define kIOPMAssertionsKey          CFSTR("assertions")
 
-#define kIOPMNumAssertionTypes      4
+
+#define kIOPMNumAssertionTypes      6
 enum {
     kHighPerfIndex          = 0,
     kPreventIdleIndex       = 1,
     kDisableInflowIndex     = 2,
-    kInhibitChargeIndex     = 3
+    kInhibitChargeIndex     = 3,
+    kDisableWarningsIndex   = 4,
+    kPreventDisplaySleepIndex = 5,
+    kEnableIdleIndex = 6
 };
 
 // Selectors for AppleSmartBatteryManagerUserClient
@@ -86,8 +90,10 @@ static void sendSmartBatteryCommand(uint32_t which, uint32_t level);
 // globals
 static CFMutableDictionaryRef assertionsDict = NULL;
 static int aggregate_assertions[kIOPMNumAssertionTypes];
-static int last_aggregate_assertions[kIOPMNumAssertionTypes] = {0, 0, 0, 0};
+static int last_aggregate_assertions[kIOPMNumAssertionTypes];
 static CFStringRef assertion_types_arr[kIOPMNumAssertionTypes];
+
+static bool idle_enable_assumed = true;
 
 /***********************************
  * Static Profiles
@@ -102,10 +108,10 @@ calculateAggregates(void)
     
     // Clear out the aggregate assertion values. We are about to re-calculate
     // these values in the big nasty loop below.
-    for(i=0; i<kIOPMNumAssertionTypes; i++)
-    {
-        aggregate_assertions[i] = 0;
-    }
+    bzero( aggregate_assertions, sizeof(aggregate_assertions) );
+    
+    // Initialize kEnableIdleIndex to idle_enable_assumed
+    aggregate_assertions[kEnableIdleIndex] = idle_enable_assumed;
     
     process_count = CFDictionaryGetCount(assertionsDict);
     process_assertions = malloc(sizeof(CFDictionaryRef) * process_count);
@@ -134,27 +140,37 @@ calculateAggregates(void)
                 asst_type = isA_CFString(
                     CFDictionaryGetValue(this_assertion, kIOPMAssertionTypeKey));
                 asst_val = isA_CFNumber(
-                    CFDictionaryGetValue(this_assertion, kIOPMAssertionValueKey));
+                    CFDictionaryGetValue(this_assertion, kIOPMAssertionLevelKey));
                 if(asst_type && asst_val) {
                     CFNumberGetValue(asst_val, kCFNumberIntType, &val);
-                    if(kIOPMAssertionEnable == val)
+                    if(kIOPMAssertionLevelOn == val)
                     {
-                        if(kCFCompareEqualTo ==
-                            CFStringCompare(asst_type, kIOPMCPUBoundAssertion, 0))
+                        if (CFEqual(asst_type, kIOPMAssertionTypeNeedsCPU))
                         {
                             aggregate_assertions[kHighPerfIndex] = 1;
-                        } else if(kCFCompareEqualTo ==
-                            CFStringCompare(asst_type, kIOPMPreventIdleSleepAssertion, 0))
+                        } else if (CFEqual(asst_type, kIOPMAssertionTypeNoIdleSleep))
                         {
                             aggregate_assertions[kPreventIdleIndex] = 1;
-                        } else if(kCFCompareEqualTo ==
-                            CFStringCompare(asst_type, kIOPMInflowDisableAssertion, 0))
+                        } else if (CFEqual(asst_type, kIOPMAssertionTypeEnableIdleSleep))
+                        {
+                            aggregate_assertions[kEnableIdleIndex] = 1;
+                            
+                            // Once idle_enable_assumed != true, the system will not idle sleep
+                            // unless kIOPMAssertionTypeEnableIdleSleep is asserted.
+                            idle_enable_assumed = false;
+
+                        } else if (CFEqual(asst_type, kIOPMAssertionTypeDisableInflow))
                         {
                             aggregate_assertions[kDisableInflowIndex] = 1;
-                        } else if(kCFCompareEqualTo ==
-                            CFStringCompare(asst_type, kIOPMChargeInhibitAssertion, 0))
+                        } else if (CFEqual(asst_type, kIOPMAssertionTypeInhibitCharging))
                         {
                             aggregate_assertions[kInhibitChargeIndex] = 1;
+                        } else if (CFEqual(asst_type, kIOPMAssertionTypeDisableLowBatteryWarnings))
+                        {
+                            aggregate_assertions[kDisableWarningsIndex] = 1;
+                        } else if (CFEqual(asst_type, kIOPMAssertionTypeNoDisplaySleep))
+                        {
+                            aggregate_assertions[kPreventDisplaySleepIndex] = 1;
                         }
                     }
                 }
@@ -175,11 +191,16 @@ evaluateAssertions(void)
 {
     calculateAggregates(); // fills results into aggregate_assertions global
 
-    // Perform kHighPerfIndex
-    if(aggregate_assertions[kHighPerfIndex]) {
-        overrideSetting(kPMForceHighSpeed, 1);
+    // Override PM settings
+    overrideSetting( kPMForceHighSpeed, 
+                    aggregate_assertions[kHighPerfIndex]);
+    overrideSetting( kPMPreventDisplaySleep, 
+                    aggregate_assertions[kPreventDisplaySleepIndex]);
+    if(  aggregate_assertions[kPreventIdleIndex]
+     || !aggregate_assertions[kEnableIdleIndex]) {
+        overrideSetting(kPMPreventIdleSleep, 1);
     } else {
-        overrideSetting(kPMForceHighSpeed, 0);
+        overrideSetting(kPMPreventIdleSleep, 0);
     }
     
     // Perform kDisableInflowIndex
@@ -201,7 +222,16 @@ evaluateAssertions(void)
         sendSmartBatteryCommand( kSBUCChargeInhibit, 
                         aggregate_assertions[kInhibitChargeIndex]);
     }
-
+    
+    // Perform low battery warning
+    if( aggregate_assertions[kDisableWarningsIndex] 
+        != last_aggregate_assertions[kDisableWarningsIndex]) 
+    {
+        _setRootDomainProperty( CFSTR("BatteryWarningsDisabled"),
+                                (aggregate_assertions[kDisableWarningsIndex]
+                                    ? kCFBooleanTrue : kCFBooleanFalse));
+    }
+    
     bcopy(aggregate_assertions, last_aggregate_assertions, 
                             sizeof(aggregate_assertions));
     
@@ -209,6 +239,7 @@ evaluateAssertions(void)
 }
 
 
+#if HAVE_SMART_BATTERY
 static void
 sendSmartBatteryCommand(uint32_t which, uint32_t level)
 {
@@ -231,8 +262,7 @@ sendSmartBatteryCommand(uint32_t which, uint32_t level)
     if(kIOReturnSuccess != kret) {
         goto bail;
     }
-/*
-    // TODO: For Leopard only
+
     kret = IOConnectCallMethod(
                     sbconnection, // connection
                     which,      // selector
@@ -244,35 +274,51 @@ sendSmartBatteryCommand(uint32_t which, uint32_t level)
                     &output_count,  // output count
                     NULL,       // output struct
                     0);         // output struct count
-*/
-    // 10.4.x compatible call
-    kret = IOConnectMethodScalarIScalarO(
-                    sbconnection,   // connection
-                    which,          // selector
-                    1,              // input count
-                    1,              // output count
-                    level,          // in
-                    &uc_return);    // out
-
-    if( kIOReturnSuccess != kret
-        || kIOReturnSuccess != uc_return )
-    {
-        goto bail;
-    }
-
-    // success!
-    return;
 
 bail:
-    if(KERN_SUCCESS != kret) {
-        asl_log(NULL, NULL, ASL_LEVEL_INFO, 
-                        "PM smartBattery command error 0x%08x", kret);
-    } else {
-        asl_log(NULL, NULL, ASL_LEVEL_INFO, 
-                        "PM smartBattery command error 0x%08x", (int)uc_return);
+
+    if (MACH_PORT_NULL != sbconnection) {
+        IOServiceClose(sbconnection);
     }
+
+    if (MACH_PORT_NULL != sbmanager) {
+        IOObjectRelease(sbmanager);
+    }
+
     return;
 }
+#else /* HAVE_SMART_BATTERY */
+
+static void
+sendSmartBatteryCommand(uint32_t which, uint32_t level)
+{
+    kern_return_t       kr;
+    io_iterator_t       iter;
+    io_registry_entry_t next;
+
+    do
+    {
+    if (kSBUCChargeInhibit != which)
+        break;
+    kr = IOServiceGetMatchingServices(kIOMasterPortDefault, 
+        IOServiceMatching("IOPMPowerSource"), &iter);
+    if (kIOReturnSuccess != kr)
+        break;
+    if (MACH_PORT_NULL == iter)
+        break;
+    while ((next = IOIteratorNext(iter)))
+    {
+        kr = IORegistryEntrySetCFProperty(next, CFSTR(kIOPMPSIsChargingKey), 
+                          level ? kCFBooleanFalse : kCFBooleanTrue);
+        IOObjectRelease(next);
+    }
+    IOObjectRelease(iter);
+    }
+    while (false);
+    return;
+}
+
+#endif /* HAVE_SMART_BATTERY */
 
 
 __private_extern__ IOReturn  
@@ -355,16 +401,21 @@ exit:
 
  
 /***********************************
- * Dynamic Profiles
+ * Dynamic Assertions
  ***********************************/
+#define ID_FROM_INDEX(idx)  (idx + 300)
+#define INDEX_FROM_ID(id)   (id - 300)
 
 __private_extern__ void
 PMAssertions_prime(void)
 {
-    assertion_types_arr[kHighPerfIndex] = kIOPMCPUBoundAssertion; 
-    assertion_types_arr[kPreventIdleIndex] = kIOPMPreventIdleSleepAssertion;
-    assertion_types_arr[kDisableInflowIndex] = kIOPMInflowDisableAssertion; 
-    assertion_types_arr[kInhibitChargeIndex] = kIOPMChargeInhibitAssertion;
+    assertion_types_arr[kHighPerfIndex]             = kIOPMAssertionTypeNeedsCPU; 
+    assertion_types_arr[kPreventIdleIndex]          = kIOPMAssertionTypeNoIdleSleep;
+    assertion_types_arr[kDisableInflowIndex]        = kIOPMAssertionTypeDisableInflow; 
+    assertion_types_arr[kInhibitChargeIndex]        = kIOPMAssertionTypeInhibitCharging;
+    assertion_types_arr[kDisableWarningsIndex]      = kIOPMAssertionTypeDisableLowBatteryWarnings;
+    assertion_types_arr[kPreventDisplaySleepIndex]  = kIOPMAssertionTypeNoDisplaySleep;
+    assertion_types_arr[kEnableIdleIndex]           = kIOPMAssertionTypeEnableIdleSleep;
 
     return;
 }
@@ -387,9 +438,9 @@ IOReturn _IOPMAssertionCreateRequiresRoot
     kern_return_t           err = KERN_SUCCESS;
     int                     i;
 
-    // assertion_id will be set to -1 on failure, unless we succeed here
-    // and it gets a valid [0, (kAssertionsArraySize-1)] value below.
-    *assertion_id = -1;
+    // assertion_id will be set to kIOPMNullAssertionID on failure, 
+    // unless we succeed here and it gets a valid value below.
+    *assertion_id = kIOPMNullAssertionID;
 
     cf_port_for_task = CFMachPortCreateWithPort(0, task, NULL, NULL, 0);
     if(!cf_port_for_task) {
@@ -450,10 +501,7 @@ IOReturn _IOPMAssertionCreateRequiresRoot
 
     tmp_assertions = CFDictionaryGetValue(this_task, kIOPMAssertionsKey);
     if(!tmp_assertions) {
-        assertions = CFArrayCreateMutable(0, kAssertionsArraySize, &kCFTypeArrayCallBacks);
-        for(i=0; i<kAssertionsArraySize; i++) {
-            CFArraySetValueAtIndex(assertions, i, kCFBooleanFalse);
-        }
+        assertions = CFArrayCreateMutable(0, 0, &kCFTypeArrayCallBacks);
     } else {
         assertions = CFArrayCreateMutableCopy(0, 0, tmp_assertions);
     }
@@ -463,28 +511,26 @@ IOReturn _IOPMAssertionCreateRequiresRoot
     // refcount them if they exist
 
     // find empty slot
-    int         index = -1;
+    CFIndex     arrayIndex;
     int         asst_count;
     asst_count = CFArrayGetCount(assertions);
-    if(0 == asst_count) {
-        index = 0;
-    } else {
-        for(i=0; i<asst_count; i++) {
-            // find the first empty element in the array
-            // empty elements are denoted by the value kCFBooleanFalse
-            if(kCFBooleanFalse == CFArrayGetValueAtIndex(assertions, i)) break;
-        }
-        if(kAssertionsArraySize == i) {
-            // ERROR! out of space in array!
-            result = kIOReturnNoMemory;
-            goto exit;
-        } else index = i;
+    for (arrayIndex=0; arrayIndex<asst_count; arrayIndex++) 
+    {
+        // find the first empty element in the array
+        // empty elements are denoted by the value kCFBooleanFalse
+        if(kCFBooleanFalse == CFArrayGetValueAtIndex(assertions, arrayIndex)) break;
+    }
+    if (arrayIndex >= kMaxTaskAssertions) 
+    {
+        // ERROR! out of space in array!
+        result = kIOReturnNoMemory;
+        goto exit;
     }
 
     CFMutableDictionaryRef          new_assertion_dict = NULL;
     CFNumberRef                     cf_assertion_val = NULL;
     
-    *assertion_id = index;
+    *assertion_id = ID_FROM_INDEX(arrayIndex);
     new_assertion_dict = CFDictionaryCreateMutable(0, 2,
                     &kCFTypeDictionaryKeyCallBacks,
                     &kCFTypeDictionaryValueCallBacks);
@@ -492,9 +538,9 @@ IOReturn _IOPMAssertionCreateRequiresRoot
     CFDictionarySetValue(new_assertion_dict, 
                             kIOPMAssertionTypeKey, assertionString);
     CFDictionarySetValue(new_assertion_dict, 
-                            kIOPMAssertionValueKey, cf_assertion_val);
+                            kIOPMAssertionLevelKey, cf_assertion_val);
     CFRelease(cf_assertion_val);
-    CFArraySetValueAtIndex(assertions, index, new_assertion_dict);
+    CFArraySetValueAtIndex(assertions, arrayIndex, new_assertion_dict);
     CFRelease(new_assertion_dict);
 
     evaluateAssertions();
@@ -525,18 +571,15 @@ kern_return_t _io_pm_assertion_release
     int                     n;
     Boolean                 releaseTask;
 
-    if((assertion_id < 0) || (assertion_id >= kAssertionsArraySize)) {
-        *return_code = kIOReturnBadArgument;
-        goto exit;
-    }
-
     cf_port_for_task = CFMachPortCreateWithPort(0, task, NULL, NULL, 0);
     if(!cf_port_for_task) {
         *return_code = kIOReturnNoMemory;
         goto exit;
     }
 
-    calling_task = CFDictionaryGetValue(assertionsDict, cf_port_for_task);
+    if (assertionsDict) {
+        calling_task = CFDictionaryGetValue(assertionsDict, cf_port_for_task);
+    }
     if(!calling_task) {
         *return_code = kIOReturnNotFound;
         goto exit;
@@ -550,20 +593,25 @@ kern_return_t _io_pm_assertion_release
     }
     
     // Look up assertion at assertion_id and make sure it exists
-    assertion_to_release = CFArrayGetValueAtIndex(assertions, assertion_id);
+    CFIndex arrayIndex = INDEX_FROM_ID(assertion_id);
+    if ((arrayIndex < 0) || (arrayIndex >= CFArrayGetCount(assertions))) {
+        *return_code = kIOReturnNotFound;
+        goto exit;
+    }
+    assertion_to_release = CFArrayGetValueAtIndex(assertions, arrayIndex);
     if(!assertion_to_release || !isA_CFDictionary(assertion_to_release)) {
         *return_code = kIOReturnNotFound;
         goto exit;
     }
     
     // Release it
-    CFArraySetValueAtIndex(assertions, assertion_id, kCFBooleanFalse);
+    CFArraySetValueAtIndex(assertions, arrayIndex, kCFBooleanFalse);
 
     // Check for last reference and cleanup
     releaseTask = TRUE;
     n = CFArrayGetCount(assertions);
     for (i =0; i < n; i++) {
-        CFTypeRef	assertion;
+        CFTypeRef    assertion;
 
         assertion = CFArrayGetValueAtIndex(assertions, i);
         if (!CFEqual(assertion, kCFBooleanFalse)) {

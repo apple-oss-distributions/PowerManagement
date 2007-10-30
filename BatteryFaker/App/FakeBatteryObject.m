@@ -133,9 +133,6 @@
                 forKey:@kIOPMPSHealthConfidenceKey];
 
 
-NSLog(@"%@", [properties description]);
-
-
     // Stuff the resulting properties down to the kext.
     
     faker_kext_registry_entry = IOServiceGetMatchingService(

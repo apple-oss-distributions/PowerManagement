@@ -8,34 +8,72 @@
  */
  
 /*
- *  This builds a small binary whose sole purpose is to run the command
- *  and arguments it is passed with root permissions.
- *  In the context of BatteryFaker, this will run a shell script that
- *  requires root privileges to load and unload kexts.
+ *  This builds a small suid binary whose sole purpose is to run 
+ *  kextload and kextunload commands as root.
+ *
+ *
+ *  Usage:
+ *      suidLauncher load <path_to_kext>
+ *      suidLauncher unload <path_to_kext>
  */
 
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
 
+#define ARG_LOAD            "load"
+#define ARG_UNLOAD          "unload"
+#define ARG_KICKER          "kickbattmon"
+
+
+#define PATH_KEXTLOAD       "/sbin/kextload"
+#define PATH_KEXTUNLOAD     "/sbin/kextunload"
+#define PATH_KILLALL        "/usr/bin/killall"
+
 int main(int argc, char *argv[])
 {
-    int err_return;
+    int         exec_err;
+    char        *kextPath;
     
-    if(1 == argc) {
+    if (argc < 2) 
+    {
         // No arguments; nothing to execute!
-        exit(1);
+        printf("error: no arguments\n");
+        return 0;
+    }
+    
+    kextPath = argv[2];
+    
+    if ( (0 == strcmp(argv[1], ARG_LOAD))
+            && kextPath) 
+    {
+        exec_err = execl(PATH_KEXTLOAD, PATH_KEXTLOAD, kextPath, NULL);    
+    } else if ( (0 == strcmp(argv[1], ARG_UNLOAD))
+                && kextPath ) 
+    {
+        // exec kextunload
+        exec_err = execl(PATH_KEXTUNLOAD, PATH_KEXTUNLOAD, kextPath, NULL);
+    } else if (0 == strcmp(argv[1], ARG_KICKER))
+    {
+        exec_err = execl(PATH_KILLALL, PATH_KILLALL, "SystemUIServer", NULL);
+    } else {
+        printf("error: invalid input. did nothing.\n");
+        return 0;
+    }
+    
+    if (0 == exec_err) {
+        printf("\tsuccess: %s\n", argv[1]);
+        return 0;
     }
 
-    err_return = 
-        execvp( /* prog name */ argv[1], /* arguments */ &argv[2]);
-
-    if( -1 == err_return ) {
-        printf("Errno %d from execvp; \"%s\"\n", errno, strerror(errno));
-        exit(2);
+    if (-1 == exec_err) 
+    {
+        printf("Error %d from execvp \"%s\"; \"%s\"\n", exec_err, strerror(exec_err), argv[1]);
+        return 2;
     } else {
-        printf("Error %d return from execvp.\n");
-        exit(3);
+        printf("Error %d return from execvp \"%s\".\n", argv[1]);
+        return 3;
     }
 }

@@ -24,6 +24,11 @@ static void usage(int level);
 
 @implementation BatteryFakerWindowController
 
+/******************************************************************************
+ *
+ * App init
+ *
+ ******************************************************************************/
 - (id)init
 {
     NSBundle    *myBundle = [NSBundle mainBundle];
@@ -74,13 +79,18 @@ static void usage(int level);
     return [super init];
 }
 
+/******************************************************************************
+ *
+ * App awakefromNi
+ *
+ ******************************************************************************/
 - awakeFromNib
 {
     [batt awake];
 
     [ups awake];
     
-    [self runLoadScriptAsRoot:kLoadArg];
+    [self runSUIDTool:kLoadArg];
 
     [self updateKEXTLoadStatus];
 
@@ -89,7 +99,24 @@ static void usage(int level);
     return nil;
 }
 
+/******************************************************************************
+ *
+ * window close handler
+ *
+ ******************************************************************************/
+- (void)windowWillClose:(NSNotification *)notification
+{
+    /* attempt to unload BatteryFaker.kext */
+    [self runSUIDTool:kUnloadArg];
+}
 
+
+/******************************************************************************
+ *
+ * UIchange - read UI state from window, blast into BatteryFaker.kext
+ * and/or UPSFaker.plugin
+ *
+ ******************************************************************************/
 - (IBAction)UIchange:(id)sender
 {
     // Let each battery re-sync with its UI
@@ -102,9 +129,16 @@ static void usage(int level);
     return;
 }
 
+
+/******************************************************************************
+ *
+ * Menu Item Actions
+ *
+ ******************************************************************************/
+
 - (IBAction)kickBatteryMonitorMenu:(id)sender
 {
-    [self runLoadScriptAsRoot:kKickBattMonArg];
+    [self runSUIDTool:kKickBattMonArg];
 }
 
 - (IBAction)enableMenuExtra:(id)sender
@@ -135,6 +169,18 @@ static void usage(int level);
     NSLog(@"Opening Energy Saver Menu!\n");
 }
 
+- (IBAction)scenarioSelector:(id)sender
+{
+    NSLog(@"%@", [sender title]);
+}
+
+
+/******************************************************************************
+ *
+ * batteryImage
+ * accessor for appropritae tif image for battery %
+ *
+ ******************************************************************************/
 
 // Accessor
 - (NSImage *)batteryImage:(int)i isCharging:(bool)c
@@ -153,6 +199,12 @@ static void usage(int level);
     }
 }
 
+
+/******************************************************************************
+ *
+ * updateKEXTLoadStatus
+ *
+ ******************************************************************************/
 - (void)updateKEXTLoadStatus
 {
     // Time to publish whether the kext is loaded
@@ -176,6 +228,11 @@ static void usage(int level);
     return;
 }
 
+/******************************************************************************
+ *
+ * updateUPSPlugInStatus
+ *
+ ******************************************************************************/
 - (void)updateUPSPlugInStatus
 {
     bool upsPlugInLoaded = false;
@@ -196,47 +253,37 @@ static void usage(int level);
     }
 }
 
-
-- (void)windowWillClose:(NSNotification *)notification
-{
-    NSLog(@"Window Closing.\n");
-
-    /* attempt to unload BatteryFaker.kext */
-    [self runLoadScriptAsRoot:kUnloadArg];
-}
-
-- (int)runLoadScriptAsRoot:(char *)loadArg
+/******************************************************************************
+ *
+ * runSUIDTool
+ *
+ * exec's suidLauncherTool with an argument of 'load', 'unload',
+ *  or 'kickbattmon'
+ *
+ ******************************************************************************/
+- (int)runSUIDTool:(char *)loadArg
 {    
-    int pid;
-    int result = -1;
-    union wait status;
+    int         pid;
+    int         result = -1;
+    union       wait status;
 
     char        suidToolPath[255];
-    char        bundlePath[255];
-    char        scriptPath[255];
+    char        kextPath[255];
     
-
-    /* Script is in:
-     * BatteryFaker.app/Contents/Resources/fakerloader.sh
-     */
-    [[[NSBundle mainBundle] resourcePath] 
-                getCString:scriptPath maxLength:255 
-                encoding:NSUTF8StringEncoding];
-    strcat(scriptPath, "/fakerloader.sh");
-
     /* suidToolPath is in:
      * BatteryFaker.app/Contents/Resources/suidToolPath
      */
     [[[NSBundle mainBundle] resourcePath] 
                 getCString:suidToolPath maxLength:255 
                 encoding:NSUTF8StringEncoding];
-    strcat(suidToolPath, "/suidHelperTool");
+    strcat(suidToolPath, "/suidLauncherTool");
 
-    /* Base path for the bundle
+    /* BatterFaker.kext
      */
-    [[[NSBundle mainBundle] bundlePath] 
-                getCString:bundlePath maxLength:255 
+    [[[NSBundle mainBundle] resourcePath] 
+                getCString:kextPath maxLength:255 
                 encoding:NSUTF8StringEncoding];
+    strcat(kextPath, "/BatteryFaker.kext");
             
     pid = fork();
     if (pid == 0)
@@ -248,10 +295,26 @@ static void usage(int level);
         if(0 == strcmp( kKickBattMonArg, loadArg ))
         {
             result = execl( suidToolPath, suidToolPath, 
-                            scriptPath, loadArg, NULL);
+                            kKickBattMonArg, NULL);
+            
+            /* 
+             * debug
+             */
+            printf("%s %s\n", suidToolPath, kKickBattMonArg);
         } else {
+            /* loadArg == ('load' or 'unload') */
             result = execl( suidToolPath, suidToolPath, 
-                            scriptPath, loadArg, bundlePath, NULL);
+                            loadArg, kextPath, NULL);
+            /* 
+             * debug
+             */
+            printf("%s %s %s\n", suidToolPath, loadArg, kextPath);
+        }
+        
+        if (-1 == result) 
+        {
+            printf("Error %d from execvp \"%s\"\n", result, strerror(result));
+            return 2;
         }
         
         /* We can only get here if the exec failed */
@@ -319,7 +382,7 @@ static kmod_info_t * kmod_get_loaded(unsigned int * num_kmods)
 {
     kmod_info_t * kmod_list_returned = NULL;  // returned
 
-    port_t host_port = PORT_NULL;
+    mach_port_t host_port = MACH_PORT_NULL;
     kern_return_t mach_result = KERN_SUCCESS;
     kmod_info_t * kmod_list = NULL;  // must vm_deallocate()
     unsigned int kmod_bytecount;  // not really used
@@ -431,7 +494,7 @@ finish:
     * leaks. We don't care about the kern_return_t value of this
     * call for now as there's nothing we can do if it fails.
     */
-    if (PORT_NULL != host_port) {
+    if (MACH_PORT_NULL != host_port) {
         mach_port_deallocate(mach_task_self(), host_port);
     }
 

@@ -42,6 +42,8 @@ type date+time
 repeat cancel
 .Nm
 repeat type weekdays time
+.Nm
+.Op touch | sleepnow | noidle | lock
 .\.Nm
 .\.Op Fl a b c u
 .\.Op dim
@@ -160,6 +162,15 @@ will display the settings associated with each Energy Saver profile.
 .br
 .Ar sms
 - use Sudden Motion Sensor to park disk heads on sudden changes in G force (value = 0/1)
+.br
+.Ar hibernatemode
+- change hibernation mode. Please use caution. (value = integer)
+.br
+.Ar hibernatefile
+- change hibernation image file location. Image may only be located on the root volume. Please use caution. (value = path)
+.br
+.Ar ttyskeepawake
+- prevent idle system sleep when any tty (e.g. remote login session) is 'active'. A tty is 'inactive' only when its idle time exceeds the system sleep timer. (value = 0/1)
 .Sh SETTINGS PROFILES
 Mac OS X stores sets of pre-defined Energy Saver settings in a few numbered profiles (1, 2, 3). 
 All user-modified settings are stored in the custom profile (-1). 
@@ -188,6 +199,25 @@ corresponds to Energy Saver Optimization for "Better Performance"
 .br
 .Ar -1
 corresponds to Energy Saver Optimization for "Custom"
+.Sh SAFE SLEEP ARGUMENTS
+.Ar hibernatemode
+takes a bitfield argument defining SafeSleep behavior. Passing 0 disables SafeSleep altogether, forcing the computer into a regular sleep.
+.Pp
+.Ar 0001 
+(bit 0) enables hibernation; causes OS X to write memory state to hibernation image at sleep time. On wake (without bit 1 set) OS X will resume from the hibernation image. Bit 0 set (without bit 1 set) causes OS X to write memory state and immediately hibernate at sleep time.
+.Pp
+.Ar 0010
+(bit 1), in conjunction with bit 0, causes OS X to maintain system state in memory and leave system power on until battery level drops below a near empty threshold (This enables quicker wakeup from memory while battery power is available). Upon nearly emptying the battery, OS X shuts off all system power and hibernates; on wake the system will resume from hibernation image, not from memory. 
+.Pp
+.Ar hibernatemode 
+is set to 3 (binary 0011) by default on supported portables.
+.Pp
+.Ar hibernatemode 
+is set to 0 (binary 0000) by default on supported desktops.
+.Pp
+Please note that
+.Ar hibernatefile
+may only point to a file located on the root volume.
 .Sh UPS SPECIFIC ARGUMENTS
 .br
 UPS-specific arguments are only valid following the 
@@ -251,6 +281,15 @@ a problem with an aging battery.
 .br
 .Ar force 
 - tells PM to immediately activate these settings. Does not write them to disk, and the settings may easily be overwritten. Useful in circumstances where PM's configd plugin happens not to be running.
+.br
+.Ar touch
+- PM re-reads existing settings from disk.
+.br
+.Ar noidle
+- while continuousy running, pmset prevents idle sleep.
+.br
+.Ar sleepnow
+- causes an immediate system sleep
 .br
 .Ar dim 
 - deprecated in 10.4 in favor of 'displaysleep'. 'dim' will continue to work.

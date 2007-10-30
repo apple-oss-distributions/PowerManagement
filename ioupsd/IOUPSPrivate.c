@@ -40,7 +40,7 @@
 #include <IOKit/ps/IOPSKeys.h>
 
 #include "IOUPSPrivate.h"
-#include "ioupsplugin.h"
+#include "IOUPSPlugIn.h"
 
 Boolean IOUPSMIGServerIsRunning(mach_port_t * bootstrap_port_ref, mach_port_t * upsd_port_ref)
 {

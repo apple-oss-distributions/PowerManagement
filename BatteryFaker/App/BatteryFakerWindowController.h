@@ -31,7 +31,9 @@
 
 - (IBAction)openEnergySaverMenu:(id)sender;
 
-- (int)runLoadScriptAsRoot:(char *)loadArg;
+- (IBAction)scenarioSelector:(id)sender;
+
+- (int)runSUIDTool:(char *)loadArg;
 
 - (void)updateKEXTLoadStatus;
 

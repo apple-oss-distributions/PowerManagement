@@ -107,9 +107,6 @@ IOReturn BatteryFaker::setProperties(OSObject *arg_props)
 {
     OSDictionary        *dict = OSDynamicCast(OSDictionary, arg_props);
     OSDictionary        *d;
-
-    IOLog("BatteryFakerKEXT::setProperties()\n");
-                 
     // Some user space application has specified the faked out battery state
     // we trust that this dictionary is valid & complete, and we automatically
     // set it as our state and signal an update.
@@ -117,11 +114,7 @@ IOReturn BatteryFaker::setProperties(OSObject *arg_props)
     if(fake_batt_dict_sym 
        && (d = OSDynamicCast(OSDictionary, dict->getObject(fake_batt_dict_sym)) ))
     {
-    
-        IOLog("Received fake dictionary; activating.\n");
-
         batteries[0]->setBatteryProperties(d);
-
     }
     return kIOReturnSuccess;
 }
@@ -207,12 +200,11 @@ IOReturn BatteryFakerObject::setBatteryProperties(OSDictionary *d)
     if(!d) {
         // An empty dictionary indicates we should disappear ourselves.
         // We should pretend this battery no longer exists, so we should
-        // remove properties for every
+        // remove properties.
+        
+        // TODO: remove properties.
         return 0;
     }
-
-    IOLog("Received fake dictionary for battery %d; activating.\n", 
-                                                fBatteryIndex);
     
     setProperty("PropertiesDict", d);
 

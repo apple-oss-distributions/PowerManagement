@@ -24,6 +24,9 @@
  *
  */
 
+#include <sys/systm.h>
+#include <sys/proc.h>
+#include <kern/task.h>
 #include "AppleSmartBatteryManagerUserClient.h"
 
 #define super IOUserClient
@@ -33,6 +36,7 @@ enum {
     kCallOnSelf = 1
 };
 
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 OSDefineMetaClassAndStructors(AppleSmartBatteryManagerUserClient, IOUserClient)
@@ -41,10 +45,32 @@ OSDefineMetaClassAndStructors(AppleSmartBatteryManagerUserClient, IOUserClient)
 
 bool AppleSmartBatteryManagerUserClient::initWithTask(task_t owningTask, 
                     void *security_id, UInt32 type, OSDictionary * properties)
-{
+{    
+    uint32_t            _pid;
 
-    if (!super::initWithTask(owningTask, security_id, type, properties))
-	return false;
+     /* Only root processes may grab exclusive OS access of the SMBus
+     * To be clear; 'exclusive' in this context only means that 
+     * SmartBattery traffic from the OS is temporarily suspended while
+     * a client with exclusive access is open.
+     * Our one and only expected exclusive access client is the Battery Updater.
+     */
+    if (kSBExclusiveSMBusAccessType == type)
+    {
+        if ( kIOReturnSuccess != 
+                clientHasPrivilege(owningTask, kIOClientPrivilegeAdministrator))
+        {
+            return false;     
+        }
+    }
+    
+    if (!super::initWithTask(owningTask, security_id, type, properties)) {    
+        return false;
+    }
+
+    fUserClientType = type;
+
+	_pid = proc_selfpid();
+	setProperty("pid", _pid, 32);
 
     fOwningTask = owningTask;
     task_reference (fOwningTask);    
@@ -54,11 +80,24 @@ bool AppleSmartBatteryManagerUserClient::initWithTask(task_t owningTask,
 
 bool AppleSmartBatteryManagerUserClient::start( IOService * provider )
 {
-    assert(OSDynamicCast(IOPMrootDomain, provider));
-    if(!super::start(provider))
-        return false;
     fOwner = (AppleSmartBatteryManager *)provider;
     
+    /*
+     * exclusive access user client?
+     * shut up the AppleSmartBattery from doing ongoing polls
+     *
+     */
+    if (kSBExclusiveSMBusAccessType == fUserClientType)
+    {
+        if(!fOwner->requestExclusiveSMBusAccess(true)) {
+            // Could not obtain exclusive access to SmartBattery
+            return false;
+        }
+    }
+    
+    if(!super::start(provider))
+        return false;
+
     return true;
 }
 
@@ -117,6 +156,11 @@ IOReturn AppleSmartBatteryManagerUserClient::secureChargeInhibit(
 
 IOReturn AppleSmartBatteryManagerUserClient::clientClose( void )
 {
+    /* remove our request for exclusive SMBus access */
+    if (kSBExclusiveSMBusAccessType == fUserClientType) {    
+        fOwner->requestExclusiveSMBusAccess(false);
+    }
+
     detach(fOwner);
     
     if(fOwningTask) {
@@ -147,12 +191,17 @@ AppleSmartBatteryManagerUserClient::getTargetAndMethodForIndex(
             (IOService *)kCallOnOwner, 
             (IOMethod)&AppleSmartBatteryManager::setPollingInterval, 
             kIOUCScalarIScalarO, 1, 0
+        },
+        { // kSBSMBusReadWriteWord = 3
+            (IOService *)kCallOnOwner,
+            (IOMethod)&AppleSmartBatteryManager::performExternalTransaction,
+            kIOUCStructIStructO, sizeof(EXSMBUSInputStruct), sizeof(EXSMBUSOutputStruct)
         }
     };
-    
-    if(index >= kNumBattMethods)
-    	return NULL;
-    else {
+        
+    if(index >= kNumBattMethods) {
+        return NULL;
+    } else {
         if (kCallOnSelf == (int)sMethods[index].object)
             *targetP = this;
         else

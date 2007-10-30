@@ -6,7 +6,9 @@
                 disableMenuExtra = id; 
                 enableMenuExtra = id; 
                 kickBatteryMonitorMenu = id; 
+                myAction = id; 
                 openEnergySaverMenu = id; 
+                scenarioSelector = id; 
             }; 
             CLASS = BatteryFakerWindowController; 
             LANGUAGE = ObjC; 
