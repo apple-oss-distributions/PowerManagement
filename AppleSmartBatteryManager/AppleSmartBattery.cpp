@@ -113,6 +113,10 @@ static const OSSymbol *_ManfDateSym =
                         OSSymbol::withCString(kIOPMPSManufactureDateKey);
 static const OSSymbol *_DesignCapacitySym = 
                         OSSymbol::withCString(kIOPMPSDesignCapacityKey);
+static const OSSymbol *_TemperatureSym = 
+                        OSSymbol::withCString("Temperature");
+static const OSSymbol *_CellVoltageSym = 
+                        OSSymbol::withCString("CellVoltage");
 
 
 #define super IOPMPowerSource
@@ -199,6 +203,7 @@ bool AppleSmartBattery::start(IOService *provider)
     fAvgCurrent = 0;
     fInflowDisabled = false;
     fRebootPolling = false;
+    fCellVoltages = NULL;
 
     fIncompleteReadRetries = kIncompleteReadRetryMax;
     
@@ -261,10 +266,10 @@ void AppleSmartBattery::logReadError(
 
     setProperty((const char *)"LatestErrorType", error_type);
 
-    IOLog("SmartBatteryManager Error: %s (%d)\n", error_type, additional_error);  
+    BattLog("SmartBatteryManager Error: %s (%d)\n", error_type, additional_error);  
     
     if(t) {
-        IOLog("\tCorresponding transaction addr=0x%02x cmd=0x%02x status=0x%02x\n",
+        BattLog("\tCorresponding transaction addr=0x%02x cmd=0x%02x status=0x%02x\n",
                                             t->address, t->command, t->status);
     }
     
@@ -293,6 +298,14 @@ void AppleSmartBattery::setPollingInterval(
 
 bool AppleSmartBattery::pollBatteryState(int path)
 {
+    /* Don't perform any SMBus activity if a AppleSmartBatteryManagerUserClient
+       has 
+     */
+    if (fStalledByUserClient) 
+    {
+        return false;
+    }
+
     // This must be called under workloop synchronization
     fMachinePath = path;
 
@@ -345,6 +358,29 @@ void AppleSmartBattery::handleChargeInhibited(bool charge_state)
     fChargeInhibited = charge_state;
     // And kick off a re-poll using this new information
     pollBatteryState(kExistingBatteryPath);
+}
+
+void AppleSmartBattery::handleUCStalled(bool stall)
+{
+    if (stall) 
+    {
+        setProperty("BatteryUpdatesUserClientStalled", true);
+    
+        /* Stalled by user client. Halt all activity. */
+        fStalledByUserClient = true;
+        fPollTimer->cancelTimeout();    
+
+        if (fPollingNow)
+        {
+            fCancelPolling = true;
+            fBatteryReadAllTimer->cancelTimeout();
+        }
+    } else {
+        removeProperty("BatteryUpdatesUserClientStalled");
+        /* Unstalled! restart polling */
+        fStalledByUserClient = false;
+        pollBatteryState(kNewBatteryPath);
+    }
 }
 
 
@@ -411,7 +447,7 @@ bool AppleSmartBattery::transactionCompletion(
     IOSMBusStatus transaction_status;
     bool        transaction_needs_retry = false;
     char        recv_str[kIOSMBusMaxDataCount+1];
-
+    OSNumber    *cell_volt_num;
 
     /* Do we need to abort an ongoing polling session? 
        Example: If a battery has just been removed in the midst of our polling, we
@@ -419,12 +455,16 @@ bool AppleSmartBattery::transactionCompletion(
        
        We do not abort newly started polling sessions where (NULL == transaction).
      */
-    if( transaction && fCancelPolling )
+    if( fCancelPolling )
     {
         fCancelPolling = false;
-        fPollingNow = false;
-        return true;
+        if( transaction )
+        {
+            fPollingNow = false;
+            return true;
+        }
     }
+
 
     /* 
      * Retry a failed transaction
@@ -487,7 +527,8 @@ bool AppleSmartBattery::transactionCompletion(
                && ((transaction->receiveData[1] == 0)
                   && (transaction->receiveData[0] == 0)) )
             {
-                IOLog("SmartBatteryManager: retrying command 0x%02x; retry due to absurd value _zero_\n",
+
+                BattLog("SmartBatteryManager: retrying command 0x%02x; retry due to absurd value _zero_\n",
                         transaction->command);
                 transaction_needs_retry = true;
             }
@@ -500,7 +541,7 @@ bool AppleSmartBattery::transactionCompletion(
                   || (transaction->receiveData[0] != 0))
                && (0 != fRetryAttempts) )
             {
-                IOLog("SmartBatteryManager: Successfully read %d on retry %d\n",
+                BattLog("SmartBatteryManager: Successfully read %d on retry %d\n",
                         transaction->command, fRetryAttempts);
                 fRetryAttempts = 0;
                 transaction_needs_retry = false;
@@ -521,7 +562,7 @@ bool AppleSmartBattery::transactionCompletion(
             setProperty("LastBattReadError", transaction_status, 16);
             setProperty("LastBattReadErrorCmd", transaction->command, 16);
 
-            IOLog("SmartBatteryManager: Giving up on retries\n");
+            BattLog("SmartBatteryManager: Giving up on retries\n");
             BattLog("SmartBattery: Giving up on (0x%02x, 0x%02x) after %d retries.\n",
                 transaction->address, transaction->command, fRetryAttempts);
 
@@ -786,6 +827,13 @@ bool AppleSmartBattery::transactionCompletion(
 
 /************ Only executed in ReadForNewBatteryPath ****************/
         case kBManufactureDateCmd:
+        /*
+         * Date is published in a bitfield per the Smart Battery Data spec rev 1.1 
+         * in section 5.1.26
+         *   Bits 0...4 => day (value 1-31; 5 bits)
+         *   Bits 5...8 => month (value 1-12; 4 bits)
+         *   Bits 9...15 => years since 1980 (value 0-127; 7 bits)
+         */
             if( kIOSMBusStatusOK == transaction_status ) 
             {
                 setManufactureDate(
@@ -1057,9 +1105,86 @@ bool AppleSmartBattery::transactionCompletion(
                 setAverageTimeToFull(0);
             }
 
-            readWordAsync(kSMBusBatteryAddr, kBCurrentCmd);
+            readWordAsync(kSMBusBatteryAddr, kBTemperatureCmd);
 
             break;
+
+        case kBTemperatureCmd:
+
+            if( kIOSMBusStatusOK == transaction_status ) 
+            {
+                my_unsigned_16 = (transaction->receiveData[1] << 8)
+                                | transaction->receiveData[0];
+
+                setProperty("Temperature", 
+                                (long long unsigned int)my_unsigned_16, 
+                                (unsigned int)16);
+
+            } else {
+                setProperty("Temperature", 
+                                (long long unsigned int)0, 
+                                (unsigned int)16 );
+            }
+
+            readWordAsync(kSMBusBatteryAddr, kBReadCellVoltage1Cmd);
+
+            break;
+
+        case kBReadCellVoltage4Cmd:
+        case kBReadCellVoltage3Cmd:
+        case kBReadCellVoltage2Cmd:
+        case kBReadCellVoltage1Cmd:
+
+            my_unsigned_16 = 0;
+            if( kIOSMBusStatusOK == transaction_status ) 
+            {
+                my_unsigned_16 = (transaction->receiveData[1] << 8)
+                                | transaction->receiveData[0];
+            }
+            
+            // Executed for first of 4
+            if( kBReadCellVoltage1Cmd == next_state) {
+                if( fCellVoltages )
+                {
+                    // Getting a non-NULL array here can only result
+                    // from a prior batt read getting aborted sometime
+                    // between reading CellVoltage1 and CellVoltage4
+                    fCellVoltages->release();
+                    fCellVoltages = NULL;
+                }
+                fCellVoltages = OSArray::withCapacity(4);            
+            }
+
+            // Executed for all 4 CellVoltage calls through here
+            if( fCellVoltages )
+            {
+                cell_volt_num = OSNumber::withNumber(
+                                    (unsigned long long)my_unsigned_16, 16);                                        
+                fCellVoltages->setObject(cell_volt_num);
+                cell_volt_num->release();
+            }
+
+            // Executed for last of 4
+            if( kBReadCellVoltage4Cmd == next_state ) 
+            {
+                // After reading cell voltage 1-4, bundle into OSArray and
+                // set property in ioreg
+                if(fCellVoltages) 
+                {
+                    setProperty( _CellVoltageSym, fCellVoltages );
+                    fCellVoltages->release();
+                    fCellVoltages = NULL;
+                } else {
+                    removeProperty( _CellVoltageSym );
+                }
+                readWordAsync(kSMBusBatteryAddr, kBCurrentCmd);
+            } else {
+                // Go to the next state of the 4
+                // kBReadCellVoltage2Cmd == kBReadCellVoltage1Cmd - 1
+                readWordAsync(kSMBusBatteryAddr, next_state - 1);
+            }
+            break;
+
 
         case kBCurrentCmd:
         

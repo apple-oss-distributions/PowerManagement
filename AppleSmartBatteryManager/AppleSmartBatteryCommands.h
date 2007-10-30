@@ -131,7 +131,12 @@ enum {
     kBManufactureNameCmd              = 0x20,     // READ BLOCK
     kBDeviceNameCmd                   = 0x21,     // READ BLOCK
     kBDeviceChemistryCmd              = 0x22,     // READ BLOCK
-    kBManufactureDataCmd              = 0x23      // READ BLOCK
+    kBManufactureDataCmd              = 0x23,     // READ BLOCK
+/* Cell Voltage */
+    kBReadCellVoltage4Cmd             = 0x3c,     // READ WORD
+    kBReadCellVoltage3Cmd             = 0x3d,     // READ WORD
+    kBReadCellVoltage2Cmd             = 0x3e,     // READ WORD
+    kBReadCellVoltage1Cmd             = 0x3f      // READ WORD
 };
 
 /*  Battery Mode Bits                                   */

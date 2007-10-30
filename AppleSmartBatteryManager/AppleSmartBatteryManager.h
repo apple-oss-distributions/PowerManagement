@@ -37,6 +37,44 @@ void BattLog(char *fmt, ...);
 class AppleSmartBattery;
 class AppleSmartBatteryManagerUserClient;
 
+/*
+ * Support for external transactions (from user space)
+ */
+enum {
+    kEXDefaultBatterySelector = 0,
+    kEXManagerSelector = 1
+};
+
+enum {
+    kEXReadWord = 0,
+    kEXWriteWord = 1,
+    kEXReadBlock = 2,
+    kEXWriteBlock = 3
+};    
+
+enum {
+    kEXFlagRetry = 1
+};
+
+#define MAX_SMBUS_DATA_SIZE     32
+
+typedef struct {
+    uint8_t         flags;
+    uint8_t         type;
+    uint8_t         batterySelector;
+    uint8_t         address;
+    uint8_t         inByteCount;
+    uint8_t         inBuf[MAX_SMBUS_DATA_SIZE];
+} EXSMBUSInputStruct;
+
+typedef struct {
+    uint32_t        status;
+    uint32_t        outByteCount;
+    uint32_t        outBuf[MAX_SMBUS_DATA_SIZE];
+} EXSMBUSOutputStruct;
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
 class AppleSmartBatteryManager : public IOService {    
     friend class AppleSmartBatteryManagerUserClient;
     
@@ -56,7 +94,11 @@ public:
 
     // Called by AppleSmartBattery
     // Re-enables AC inflow if appropriate
-    void AppleSmartBatteryManager::handleFullDischarge(void);
+    void handleFullDischarge(void);
+    
+    // bool argument true means "set", false means "clear" exclusive acces
+    // return: false means "exclusive access already granted", "true" means success
+    bool requestExclusiveSMBusAccess(bool request);
     
 private:
     // Called by AppleSmartBatteryManagerUserClient
@@ -66,7 +108,18 @@ private:
     IOReturn disableInflow(int level);
 
     // Called by AppleSmartBatteryManagerUserClient
-    IOReturn setPollingInterval(int milliSeconds);    
+    IOReturn setPollingInterval(int milliSeconds);
+    
+    // Called by AppleSmartBatteryManagerUserClient
+    // Called by Battery Updater application
+    IOReturn performExternalTransaction( 
+                        void            *in,    // struct EXSMBUSInputStruct
+                        void            *out,   // struct EXSMBUSOutputStruct
+                        IOByteCount     inSize,
+                        IOByteCount     *outSize);
+
+    IOReturn performExternalTransactionGated(void *arg0, void *arg1,
+                                             void *arg2, void *arg3);
 
     void    gatedSendCommand(int cmd, int level, IOReturn *ret_code);
 
@@ -79,6 +132,7 @@ private:
     IOCommandGate               * fManagerGate;
     IOSMBusController           * fProvider;
     AppleSmartBattery           * fBattery;
+    bool                        fExclusiveUserClient;
 };
 
 #endif

@@ -28,14 +28,25 @@
 #include <IOKit/pwr_mgt/IOPMPowerSource.h>
 #include "AppleSmartBatteryManager.h"
 
-// Method index
+/*
+ * Method index
+ */
 enum {
     kSBInflowDisable = 0,
     kSBChargeInhibit = 1,
-    kSBSetPollingInterval = 2
+    kSBSetPollingInterval = 2,
+    kSBSMBusReadWriteWord = 3
 };
 
-#define kNumBattMethods     3
+#define kNumBattMethods     4
+
+/*
+ * user client types
+ */
+enum {
+    kSBDefaultType = 0,
+    kSBExclusiveSMBusAccessType = 1
+};
 
 class AppleSmartBatteryManager;
 
@@ -46,9 +57,10 @@ class AppleSmartBatteryManagerUserClient : public IOUserClient
     friend class AppleSmartBatteryManager;
 
 private:
-    AppleSmartBatteryManager *	fOwner;
-    task_t                      fOwningTask;
-
+    AppleSmartBatteryManager *      fOwner;
+    task_t                          fOwningTask;
+    uint8_t                         fUserClientType;
+    
     IOReturn    secureInflowDisable(int level, int *return_code);
 
     IOReturn    secureChargeInhibit(int level, int *return_code);
@@ -63,7 +75,7 @@ public:
     virtual bool start( IOService * provider );
 
     virtual bool initWithTask(task_t owningTask, void *security_id, 
-					UInt32 type, OSDictionary * properties);
+                    UInt32 type, OSDictionary * properties);
 };
 
 #endif /* ! __AppleSmartBatteryManagerUserClient__ */

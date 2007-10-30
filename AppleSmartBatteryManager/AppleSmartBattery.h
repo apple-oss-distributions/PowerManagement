@@ -43,6 +43,7 @@ protected:
     IOWorkLoop                  *fWorkLoop;
     IOTimerEventSource          *fPollTimer;
     IOTimerEventSource          *fBatteryReadAllTimer;
+    bool                        fStalledByUserClient;
     bool                        fCancelPolling;
     bool                        fPollingNow;
     IOSMBusTransaction          fTransaction;
@@ -62,8 +63,9 @@ protected:
     bool                        fFullyDischarged;
     bool                        fFullyCharged;
     bool                        fBatteryPresent;
-    int                         fACConnected;
+    bool                        fACConnected;
     int                         fAvgCurrent;
+    OSArray                     *fCellVoltages;
 
     // Accessor for MaxError reading
     // Percent error in MaxCapacity reading
@@ -110,6 +112,8 @@ public:
     void    handleInflowDisabled(bool inflow_state);
 
     void    handleChargeInhibited(bool charge_state);
+    
+    void    handleUCStalled(bool stall);
 
 protected:
     void    logReadError( const char *error_type, 

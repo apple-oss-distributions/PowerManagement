@@ -11,17 +11,17 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.apple.driver.AppleSmartBatteryManager</string>
 	<key>CFBundleInfoDictionaryVersion</key>
-	<string>111.7</string>
+	<string>111.8</string>
 	<key>CFBundleName</key>
 	<string>AppleSmartBatteryManagerKEXT</string>
 	<key>CFBundlePackageType</key>
 	<string>KEXT</string>
 	<key>CFBundleShortVersionString</key>
-	<string>111.7.0</string>
+	<string>111.8.0</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>111.7.0</string>
+	<string>111.8.0</string>
 	<key>IOKitPersonalities</key>
 	<dict>
 		<key>IOSmartBatteryManager</key>

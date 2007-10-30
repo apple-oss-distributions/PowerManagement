@@ -26,6 +26,10 @@
 #include "AppleSmartBatteryManager.h"
 #include "AppleSmartBattery.h"
 
+#define kMaxRetries     5
+
+static uint8_t  retryDelaysTable[kMaxRetries] =
+    { 1, 10, 100, 1000, 1000 };
 
 // Power states!
 enum {
@@ -42,7 +46,6 @@ static IOPMPowerState myTwoStates[2] = {
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     {1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0}
 };
-
 
 #define super IOService
 
@@ -68,7 +71,6 @@ bool AppleSmartBatteryManager::start(IOService *provider)
     setProperty(gIOUserClientClassKey, (OSObject *) ucClassName);
     ucClassName->release();
     
-
     wl = getWorkLoop();
     if (!wl) {
         return false;
@@ -104,6 +106,9 @@ bool AppleSmartBatteryManager::start(IOService *provider)
     wl->addEventSource(gate);
     fBatteryGate = gate;      // enable messages
 
+    // Track UserClient exclusive access to smartbattery
+    fExclusiveUserClient = false;
+
     fBattery->registerService(0);
 
     this->registerService(0);
@@ -126,6 +131,186 @@ IOReturn AppleSmartBatteryManager::setPollingInterval(
     return kIOReturnSuccess;
 }
 
+/* 
+ * performExternalWordTransaction
+ * 
+ * Called by AppleSmartBatteryManagerUserClient
+ */
+IOReturn AppleSmartBatteryManager::performExternalTransaction( 
+    void *in,
+    void *out,
+    IOByteCount inSize,
+    IOByteCount *outSize)    
+{
+    int                     i;
+    int                     retryAttempts = 0;
+    IOSMBusTransaction      newTransaction;
+    IOReturn                transactionSuccess;
+    EXSMBUSInputStruct      *inSMBus = (EXSMBUSInputStruct *)in;
+    EXSMBUSOutputStruct     *outSMBus = (EXSMBUSOutputStruct *)out;
+    
+    if (!inSMBus || !outSMBus) 
+        return kIOReturnBadArgument;
+    
+    /* Attempt up to 5 transactions if we get failures
+     */
+    do {
+        bzero(&newTransaction, sizeof(IOSMBusTransaction));    
+    
+        // Input: bus address
+        if (0 == inSMBus->batterySelector) 
+        {
+            newTransaction.address = kSMBusBatteryAddr;
+        } else {
+            newTransaction.address = kSMBusManagerAddr;
+        }
+        
+        // Input: command
+        newTransaction.command = inSMBus->address;
+    
+        // Input: Read/Write Word/Block
+        switch (inSMBus->type) {
+            case kEXWriteWord:
+                newTransaction.protocol = kIOSMBusProtocolWriteWord;
+                newTransaction.sendDataCount = 2;
+                break;
+            case kEXReadWord:
+                newTransaction.protocol = kIOSMBusProtocolReadWord;
+                newTransaction.sendDataCount = 0;
+                break;
+            case kEXWriteBlock:
+                newTransaction.protocol = kIOSMBusProtocolWriteBlock;
+                newTransaction.sendDataCount = inSMBus->inByteCount;
+                break;
+            case kEXReadBlock:
+                newTransaction.protocol = kIOSMBusProtocolReadBlock;
+                newTransaction.sendDataCount = 0;
+                break;
+            default:
+                return kIOReturnBadArgument;
+        }
+         
+        // Input: copy data into transaction
+        //  only need to copy data for write operations
+        if ((kIOSMBusProtocolWriteWord == newTransaction.protocol)
+             || (kIOSMBusProtocolWriteBlock == newTransaction.protocol))
+        {
+            for(i = 0; i<MAX_SMBUS_DATA_SIZE; i++) {
+                newTransaction.sendData[i] = inSMBus->inBuf[i];    
+            }
+        }
+    
+    
+        if ( (inSMBus->flags & kEXFlagRetry) 
+              && (retryAttempts > 0))
+        {
+            // If this is a retry-on-failure, spin for a few microseconds
+            IODelay( retryDelaysTable[retryAttempts] );
+        }
+    
+        fManagerGate->runAction(
+                            (IOCommandGate::Action)OSMemberFunctionCast(
+                                IOCommandGate::Action, this, 
+                                &AppleSmartBatteryManager::performExternalTransactionGated),
+                           (void *)&newTransaction, 
+                           (void *)&transactionSuccess, 
+                           NULL, 
+                           NULL);
+    
+    
+        /* Output: status */
+        if ((kIOReturnSuccess == transactionSuccess) 
+            && (kIOSMBusStatusOK == newTransaction.status))
+        {
+            outSMBus->status = kIOReturnSuccess;
+        } else {
+            switch (newTransaction.status) {
+                case kIOSMBusStatusUnknownFailure:
+                case kIOSMBusStatusDeviceAddressNotAcknowledged:
+                case kIOSMBusStatusDeviceError:
+                case kIOSMBusStatusDeviceCommandAccessDenied:
+                case kIOSMBusStatusUnknownHostError:
+                    outSMBus->status = kIOReturnNoDevice;
+                    break;
+                case kIOSMBusStatusTimeout:
+                case kIOSMBusStatusBusy:
+                    outSMBus->status = kIOReturnTimeout;                
+                    break;
+                case kIOSMBusStatusHostUnsupportedProtocol:
+                    outSMBus->status = kIOReturnUnsupported;
+                    break;
+                default:
+                    outSMBus->status = kIOReturnInternalError;
+                    break;
+           }
+        }
+
+    /* Retry this transaction if we received a failure
+     */
+    } while ((inSMBus->flags & kEXFlagRetry) 
+          && (outSMBus->status != kIOReturnSuccess) 
+          && (++retryAttempts < kMaxRetries));
+
+
+    /* Output: read word/read block results */    
+    if (((kIOSMBusProtocolReadWord == newTransaction.protocol)
+         || (kIOSMBusProtocolReadBlock == newTransaction.protocol))
+        && (kIOSMBusStatusOK == newTransaction.status))
+    {
+        outSMBus->outByteCount = newTransaction.receiveDataCount;
+        
+        for(i = 0; i<outSMBus->outByteCount; i++) {
+            outSMBus->outBuf[i] = newTransaction.receiveData[i];    
+        }
+    }
+
+    return kIOReturnSuccess;
+}
+
+/* 
+ * performExternalTransactionGated
+ * 
+ * Called by AppleSmartBatteryManagerUserClient
+ */
+IOReturn AppleSmartBatteryManager::performExternalTransactionGated( 
+    void                    *arg0,
+    void                    *arg1,
+    void                    *arg2 __unused,
+    void                    *arg3 __unused)
+{
+    IOSMBusTransaction      *trans = (IOSMBusTransaction *)arg0;
+    IOReturn                *return_code = (IOReturn *)arg1;
+
+    /* Only excluive access userclients may use this interface */
+    if (!fExclusiveUserClient) {
+        return kIOReturnExclusiveAccess;
+    }
+    
+    *return_code = fProvider->performTransaction(
+                        trans,          /* transaction */
+                        OSMemberFunctionCast( 
+                            IOSMBusTransactionCompletion, /* completion */
+                            this, &AppleSmartBatteryManager::transactionCompletion),                                
+                        (OSObject *)this,       /* target */
+                        (void *)trans);         /* ref */
+
+
+    if(kIOReturnSuccess != *return_code)
+        return kIOReturnSuccess;
+
+    /* Sleep the caller's thread until the transaction completion returns */
+    fManagerGate->commandSleep(trans, THREAD_UNINT);
+
+    /* at this point our transaction is complete; return */
+    
+    return kIOReturnSuccess;
+}
+
+/* 
+ * performTransaction
+ * 
+ * Called by smart battery children
+ */
 IOReturn AppleSmartBatteryManager::performTransaction(
     IOSMBusTransaction * transaction,
     IOSMBusTransactionCompletion completion,
@@ -139,6 +324,10 @@ IOReturn AppleSmartBatteryManager::performTransaction(
                 reference);
 }
 
+/* 
+ * setPowerState
+ * 
+ */
 IOReturn AppleSmartBatteryManager::setPowerState(
     unsigned long which, 
     IOService *whom)
@@ -156,6 +345,10 @@ IOReturn AppleSmartBatteryManager::setPowerState(
 }
 
 
+/* 
+ * message
+ *
+ */
 IOReturn AppleSmartBatteryManager::message( 
     UInt32 type, 
     IOService *provider,
@@ -283,12 +476,48 @@ void AppleSmartBatteryManager::handleFullDischarge(void)
     }
 }
 
+/* 
+ * requestExclusiveSMBusAcess
+ * 
+ * Called by AppleSmartBatteryManagerUserClient
+ * When exclusive SMBus access is requested, we'll hold off on any SmartBattery bus reads.
+ * We do not do any periodic SMBus reads 
+ */
+bool AppleSmartBatteryManager::requestExclusiveSMBusAccess(
+    bool request)
+{
+    if( request && fExclusiveUserClient) {
+        /* Oops - a second client reaching for exclusive access.
+         * This shouldn't happen.
+         */
+        return false;
+    }
+
+    fExclusiveUserClient = request;
+
+    /* Signal the battery to either:
+        - stop polling
+        - begin polling anew
+     */
+    fBatteryGate->runAction(
+                    OSMemberFunctionCast( 
+                        IOCommandGate::Action, this,
+                        &AppleSmartBattery::handleUCStalled),
+                    (void *)request, NULL, NULL, NULL);
+
+    return true;
+}
 
 void AppleSmartBatteryManager::gatedSendCommand(
     int cmd, 
     int level, 
     IOReturn *ret_code)
 {
+    if (fExclusiveUserClient) {
+        *ret_code = kIOReturnExclusiveAccess;
+        return;
+    }
+
     *ret_code = kIOReturnError;
     bzero(&fTransaction, sizeof(IOSMBusTransaction));
 
@@ -342,33 +571,56 @@ bool AppleSmartBatteryManager::transactionCompletion(
     void *ref, 
     IOSMBusTransaction *transaction)
 {
-    if( kIOSMBusStatusOK == transaction->status )
-    {
-        // If we just completed sending the DisableInflow command, give a 
-        // callout to our attached battery and let them know whether its
-        // enabled or disabled.
-        if( (kMStateContCmd == transaction->command)
-            && (kSMBusManagerAddr == transaction->address) )
-        {
-            fBattery->handleInflowDisabled( 
-                        transaction->sendData[0] ? true : false);        
-        }
+    /*
+     * Transactions may be initiated by SmartBatteryManager or
+     * by external user client; we react differently to each.
+     */
 
-        // If we just completed sending the ChargeInhibit command, give a 
-        // callout to our attached battery and let them know whether its
-        // enabled or disabled.
-        if( (kBChargingCurrentCmd == transaction->command)
-            && (kSMBusChargerAddr == transaction->address) )
+    if (ref == this) {
+        /* 
+         * transaction was initiated by AppleSmartBatteryManager
+         */
+         
+        if( kIOSMBusStatusOK == transaction->status )
         {
-            fBattery->handleChargeInhibited( 
-                        (transaction->sendData[0] | transaction->sendData[1]) 
-                        ? false : true);
-        }       
-        
+            // If we just completed sending the DisableInflow command, give a 
+            // callout to our attached battery and let them know whether its
+            // enabled or disabled.
+            if( (kMStateContCmd == transaction->command)
+                && (kSMBusManagerAddr == transaction->address) )
+            {
+                fBattery->handleInflowDisabled( 
+                            transaction->sendData[0] ? true : false);        
+            }
+    
+            // If we just completed sending the ChargeInhibit command, give a 
+            // callout to our attached battery and let them know whether its
+            // enabled or disabled.
+            if( (kBChargingCurrentCmd == transaction->command)
+                && (kSMBusChargerAddr == transaction->address) )
+            {
+                fBattery->handleChargeInhibited( 
+                            (transaction->sendData[0] | transaction->sendData[1]) 
+                            ? false : true);
+            }       
+            
+        } else {
+            BattLog("AppleSmartBatteryManager::transactionCompletion:"\
+                                        "ERROR 0x%08x!\n", transaction->status);
+        }
     } else {
-        BattLog("AppleSmartBatteryManager::transactionCompletion:"\
-                                    "ERROR 0x%08x!\n", transaction->status);
+        /* 
+         * transaction was initiated by user client
+         */
+        
+        BattLog("completion: commandWaking: 0x%08x\n", transaction);
+        
+        // If it's an external transaction completion; stash the result
+        // in (ref) data structure
+        fManagerGate->commandWakeup( transaction, /* wake all */ false);
+
     }
+        
     return false;
 }
 
