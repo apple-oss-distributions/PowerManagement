@@ -58,6 +58,11 @@ enum {
 
 #define MAX_SMBUS_DATA_SIZE     32
 
+// * WriteBlock note
+// rdar://5433060
+// For block writes, clients always increment inByteCount +1 
+// greater than the actual byte count. (e.g. 32 bytes to write becomes a 33 byte count.)
+// Other types of transactions are not affected by this workaround.
 typedef struct {
     uint8_t         flags;
     uint8_t         type;

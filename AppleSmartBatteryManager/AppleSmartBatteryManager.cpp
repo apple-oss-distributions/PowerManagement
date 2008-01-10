@@ -180,7 +180,11 @@ IOReturn AppleSmartBatteryManager::performExternalTransaction(
                 break;
             case kEXWriteBlock:
                 newTransaction.protocol = kIOSMBusProtocolWriteBlock;
-                newTransaction.sendDataCount = inSMBus->inByteCount;
+                // rdar://5433060 workaround for SMC SMBus blockCount bug
+                // For block writes, clients always increment inByteCount +1 
+                // greater than the actual byte count.
+                // We decrement it here for IOSMBusController.
+                newTransaction.sendDataCount = inSMBus->inByteCount - 1;
                 break;
             case kEXReadBlock:
                 newTransaction.protocol = kIOSMBusProtocolReadBlock;
