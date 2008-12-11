@@ -32,6 +32,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <syslog.h>
+#include <unistd.h>
 #include "PrivateLib.h"
 
 enum
@@ -97,23 +98,38 @@ static IOPMBattery **batteries = NULL;
             CFSTR("Please connect your computer to AC power. If you do not, your computer will go to sleep in a few minutes to preserve the contents of memory."), \
             NULL);
 
+__private_extern__ SCDynamicStoreRef _getSharedPMDynamicStore(void)
+{
+    static SCDynamicStoreRef    shared = NULL;
+
+    if (!shared) {
+        shared = SCDynamicStoreCreate(
+                            kCFAllocatorDefault, 
+                            CFSTR("PM configd plugin"), 
+                            NULL, 
+                            NULL);    
+    }
+    
+    return shared;
+}
+
 
 __private_extern__ IOReturn 
 _setRootDomainProperty(
     CFStringRef                 key, 
     CFTypeRef                   val) 
 {
-    io_iterator_t               it;
-    io_registry_entry_t         root_domain;
+	static io_registry_entry_t  root_domain;
     IOReturn                    ret;
 
-    root_domain = IORegistryEntryFromPath( kIOMasterPortDefault, 
+	if (!root_domain)
+	{
+		root_domain = IORegistryEntryFromPath( kIOMasterPortDefault, 
                         kIOPowerPlane ":/IOPowerConnection/IOPMrootDomain");
+	}
  
     ret = IORegistryEntrySetCFProperty(root_domain, key, val);
 
-    IOObjectRelease(root_domain);
-    IOObjectRelease(it);
     return ret;
 }
 
@@ -133,7 +149,12 @@ static void sendNotification(int command)
     CFDictionarySetValue(dict, CFSTR(kPowerManagerActionKey), commandValue);
     CFDictionarySetValue(dict, CFSTR(kPowerManagerValueKey), secondsValue);
 
-    CFNotificationCenterPostNotificationWithOptions ( CFNotificationCenterGetDistributedCenter(),
+    CFNotificationCenterPostNotificationWithOptions ( 
+#if TARGET_OS_EMBEDDED
+					    CFNotificationCenterGetDarwinNotifyCenter(),
+#else
+					    CFNotificationCenterGetDistributedCenter(),
+#endif
                                             CFSTR(kPowerManagerActionNotificationName), 
                                             NULL, dict, 
                                             (kCFNotificationPostToAllSessions | kCFNotificationDeliverImmediately));
@@ -250,6 +271,12 @@ static void _unpackBatteryState(IOPMBattery *b, CFDictionaryRef prop)
         CFNumberGetValue(n, kCFNumberIntType, &b->invalidWakeSecs);
     } else {
         b->invalidWakeSecs = kInvalidWakeSecsDefault;
+    }
+    n = CFDictionaryGetValue(prop, CFSTR("PermanentFailureStatus"));
+    if (n) {
+        CFNumberGetValue(n, kCFNumberIntType, &b->pfStatus);
+    } else {
+        b->pfStatus = 0;
     }
 
     return;
@@ -445,9 +472,12 @@ static void handleMachCalendarMessage(CFMachPortRef port, void *msg,
 {
 	kern_return_t  result;
     mach_port_t    mport = CFMachPortGetPort(port); 
+	mach_port_t	   host_port;
 	
 	// Re-register for notification
-	result = host_request_notification(mach_host_self(), HOST_NOTIFY_CALENDAR_CHANGE, mport);
+	host_port = mach_host_self();
+	result = host_request_notification(host_port, HOST_NOTIFY_CALENDAR_CHANGE, mport);
+    if (host_port) mach_port_deallocate(mach_task_self(), host_port);
 	if (result != KERN_SUCCESS) {
         // Pretty fatal error. Oh well.
         return;
@@ -460,6 +490,7 @@ static void handleMachCalendarMessage(CFMachPortRef port, void *msg,
 static void registerForCalendarChangedNotification(void)
 {
 	mach_port_t tport;
+	mach_port_t host_port;
 	kern_return_t result;
 	CFRunLoopSourceRef rls;
 
@@ -484,7 +515,9 @@ static void registerForCalendarChangedNotification(void)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, kCFRunLoopDefaultMode);
 
 	// register for notification
-	result = host_request_notification(mach_host_self(),HOST_NOTIFY_CALENDAR_CHANGE, tport);
+	host_port = mach_host_self();
+	result = host_request_notification(host_port,HOST_NOTIFY_CALENDAR_CHANGE, tport);
+    if (host_port) mach_port_deallocate(mach_task_self(), host_port);
 }
 
 
@@ -533,6 +566,9 @@ callerIsConsole(
     int uid,
     int gid)
 {
+#if TARGET_OS_EMBEDDED
+	return false;
+#else
     CFStringRef                 user_name = NULL;
     uid_t                       console_uid;
     gid_t                       console_gid;
@@ -547,11 +583,219 @@ callerIsConsole(
         // no data returned re: console user's uid or gid; return "false"
         return false;
     }
-    
+#endif /* !TARGET_OS_EMBEDDED */
 }
 
 
 void _oneOffHacksSetup(void) 
 {
+#if !TARGET_OS_EMBEDDED
     registerForCalendarChangedNotification();
+#endif
+}
+
+
+#if !TARGET_OS_EMBEDDED
+
+/************************************************************************/
+/************************************************************************/
+/************************************************************************/
+/************************************************************************/
+/************************************************************************/
+
+// Code to read AppleSMC
+
+/************************************************************************/
+/************************************************************************/
+/************************************************************************/
+/************************************************************************/
+/************************************************************************/
+
+/* Do not modify - defined by AppleSMC.kext */
+enum {
+	kSMCSuccess	= 0,
+	kSMCError	= 1
+};
+enum {
+	kSMCUserClientOpen  = 0,
+	kSMCUserClientClose = 1,
+	kSMCHandleYPCEvent  = 2,	
+    kSMCReadKey         = 5,
+	kSMCWriteKey        = 6,
+	kSMCGetKeyCount     = 7,
+	kSMCGetKeyFromIndex = 8,
+	kSMCGetKeyInfo      = 9
+};
+/* Do not modify - defined by AppleSMC.kext */
+typedef struct SMCVersion 
+{
+    unsigned char    major;
+    unsigned char    minor;
+    unsigned char    build;
+    unsigned char    reserved;
+    unsigned short   release;
+    
+} SMCVersion;
+/* Do not modify - defined by AppleSMC.kext */
+typedef struct SMCPLimitData 
+{
+    uint16_t    version;
+    uint16_t    length;
+    uint32_t    cpuPLimit;
+    uint32_t    gpuPLimit;
+    uint32_t    memPLimit;
+
+} SMCPLimitData;
+/* Do not modify - defined by AppleSMC.kext */
+typedef struct SMCKeyInfoData 
+{
+    IOByteCount         dataSize;
+    uint32_t            dataType;
+    uint8_t             dataAttributes;
+
+} SMCKeyInfoData;
+/* Do not modify - defined by AppleSMC.kext */
+typedef struct {
+    uint32_t            key;
+    SMCVersion          vers;
+    SMCPLimitData       pLimitData;
+    SMCKeyInfoData      keyInfo;
+    uint8_t             result;
+    uint8_t             status;
+    uint8_t             data8;
+    uint32_t            data32;    
+    uint8_t             bytes[32];
+}  SMCParamStruct;
+
+// Forwards
+__private_extern__ IOReturn getSMCKey(
+    uint32_t key,
+    uint8_t *outBuf,
+    uint8_t outBufMax);
+static IOReturn callSMCFunction(
+    int which, 
+    SMCParamStruct *inputValues, 
+    SMCParamStruct *outputValues) ;
+
+
+// Methods
+__private_extern__ IOReturn getSMCKey(
+    uint32_t key,
+    uint8_t *outBuf,
+    uint8_t outBufMax)
+{
+    SMCParamStruct  stuffMeIn;
+    SMCParamStruct  stuffMeOut;
+    IOReturn        ret;
+    int             i;
+
+    if (key == 0 || outBuf == NULL) 
+        return kIOReturnCannotWire;
+
+    bzero(outBuf, outBufMax);
+    bzero(&stuffMeIn, sizeof(SMCParamStruct));
+    bzero(&stuffMeOut, sizeof(SMCParamStruct));
+
+    stuffMeIn.data8 = kSMCGetKeyInfo;
+    stuffMeIn.key = key;
+
+    ret = callSMCFunction(kSMCHandleYPCEvent, &stuffMeIn, &stuffMeOut);
+
+    if (stuffMeOut.result != kSMCSuccess)
+    {
+        ret = kIOReturnInternalError;
+        goto exit;
+    }
+
+    stuffMeIn.data8 = kSMCReadKey;
+    stuffMeIn.key = key;
+    stuffMeIn.keyInfo.dataSize = stuffMeOut.keyInfo.dataSize;
+
+    bzero(&stuffMeOut, sizeof(SMCParamStruct));
+
+    ret = callSMCFunction(kSMCHandleYPCEvent, &stuffMeIn, &stuffMeOut);
+
+    if (stuffMeOut.result != kSMCSuccess)
+    {
+        ret = kIOReturnInternalError;
+        goto exit;
+    }
+
+    if (outBufMax == 1) {
+        *outBuf = stuffMeOut.data8;
+    } else if (outBufMax == 4) {
+        *outBuf = stuffMeOut.data32;
+    } else {
+        if (outBufMax > stuffMeIn.keyInfo.dataSize)
+            outBufMax = stuffMeIn.keyInfo.dataSize;
+        for (i=0; i<outBufMax; i++)
+        {
+            outBuf[i] = stuffMeOut.bytes[i];
+        }
+    }
+exit:
+    return ret;
+}
+
+static IOReturn callSMCFunction(
+    int which, 
+    SMCParamStruct *inputValues, 
+    SMCParamStruct *outputValues) 
+{
+    IOReturn result = kIOReturnError;
+
+    IOByteCount    inStructSize = sizeof(SMCParamStruct);
+    IOByteCount    outStructSize = sizeof(SMCParamStruct);
+    
+    io_connect_t    _SMCConnect = IO_OBJECT_NULL;
+    io_service_t    smc = IO_OBJECT_NULL;
+
+    smc = IOServiceGetMatchingService(
+        kIOMasterPortDefault, 
+        IOServiceMatching("AppleSMC"));
+    if (IO_OBJECT_NULL == smc) {
+        return kIOReturnNotFound;
+    }
+    
+    result = IOServiceOpen(smc, mach_task_self(), 1, &_SMCConnect);        
+    if (result != kIOReturnSuccess || 
+        IO_OBJECT_NULL == _SMCConnect) 
+    {
+        _SMCConnect = IO_OBJECT_NULL;
+        goto exit;
+    }
+    
+    result = IOConnectCallMethod(_SMCConnect, kSMCUserClientOpen, 
+                    NULL, 0, NULL, 0, NULL, NULL, NULL, NULL);
+    if (result != kIOReturnSuccess) {
+        goto exit;
+    }
+    
+    result = IOConnectCallStructMethod(_SMCConnect, which, 
+                        inputValues, inStructSize,
+                        outputValues, &outStructSize);
+
+exit:    
+    if (IO_OBJECT_NULL != _SMCConnect) {
+        IOConnectCallMethod(_SMCConnect, kSMCUserClientClose, 
+                    NULL, 0, NULL, 0, NULL, NULL, NULL, NULL);
+        IOServiceClose(_SMCConnect);    
+    }
+
+    return result;
+}
+
+#endif /* TARGET_OS_EMBEDDED */
+
+
+
+__private_extern__ IOReturn getSystemManagementKeyInt32(
+    uint32_t key, 
+    uint32_t *val)
+{
+#if !TARGET_OS_EMBEDDED    
+    return getSMCKey(key, (void *)val, 4);
+#else
+    return kIOReturnNotReadable;
+#endif
 }

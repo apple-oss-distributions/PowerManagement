@@ -33,11 +33,13 @@
 #include <SystemConfiguration/SCValidation.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #include <IOKit/pwr_mgt/IOPM.h>
+#include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/ps/IOPSKeys.h>
 #include <IOKit/IOMessage.h>
 #include <syslog.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <notify.h>
 
 #include "BatteryTimeRemaining.h"
 #include "PrivateLib.h"
@@ -66,6 +68,9 @@
     Type    
 ****/
 
+#ifndef kIOPSDynamicStoreLowBattPathKey
+#define kIOPSDynamicStoreLowBattPathKey "/IOKit/LowBatteryWarning"
+#endif
 
 // Return values from calculateTRWithCurrent
 enum {
@@ -79,16 +84,20 @@ enum {
 #define kMaxBattMinutes     600
 
 // static global variables for tracking battery state
-static int              _impendingSleep = 0;
-static CFAbsoluteTime   _lastWake = 0.0;
-
+static CFAbsoluteTime   _estimatesInvalidUntil = 0.0;
+static int              _systemBatteryWarningLevel = 0;
+static bool             _warningsShouldResetForSleep = false;
+static bool             _useBatteryTimeEstimate = false;
+static bool             _ignoringTimeRemainingEstimates = false;
+static CFRunLoopTimerRef    _timeSettledTimer = NULL;
 
 // forward declarations
 static void     _initializeBatteryCalculations(void);
 static int      _populateTimeRemaining(IOPMBattery **batts);
 static void     _packageBatteryInfo(CFDictionaryRef *);
+static bool     _shouldTrustBatteryTimeEstimate(IOPMBattery *b);
 static void     _timeRemainingMaybeValid(CFRunLoopTimerRef timer, void *info);
-
+static void     _discontinuityOccurred(void);
 
 __private_extern__ void
 BatteryTimeRemaining_prime(void)
@@ -101,63 +110,75 @@ BatteryTimeRemaining_prime(void)
 __private_extern__ void
 BatteryTimeRemainingSleepWakeNotification(natural_t messageType)
 {
-    CFRunLoopTimerRef               timer_rls = NULL;
-    CFAbsoluteTime                  fire_date;
-    IOPMBattery                   **b;
+    IOPMBattery **b = _batteries();
     
-    switch ( messageType ) {
+    if (kIOMessageSystemWillPowerOn == messageType)
+    {
+        _warningsShouldResetForSleep = true;
 
-    case kIOMessageSystemWillSleep:
-        // System is going to sleep - reset time remaining calculations.
-        // Battery drain during sleep will produce an unrealistic time remaining
-        // expectation on wake from sleep unless we reset the average sample.
-        _impendingSleep = 1;
-
-        break;
-
-    case kIOMessageSystemWillPowerOn:
-
-        b = _batteries();
-        if(b && b[0]) {
-
-#if !TARGET_OS_EMBEDDED
+        if(b && b[0]) 
+        {
+            #if !TARGET_OS_EMBEDDED
             // [4422606] Delay for 1 second before grabbing wakeup time; on an
             // MP system our code may be running before the clock resync code
             // has had a chance to finish on the other processor. We  wait
             // and get a correct read before we call CFAbsoluteTimeGetCurrent()
             sleep(1);
-#endif
+            #endif
 
-            // Start invalid data timer; when it fires we assume battery data
-            // has had time to re-adjust after wake from sleep, and is now valid
-    
-            // In the meantime, any attempt to publish time remaining in 
-            // BatteriesHaveChanged will check the current time against
-            // _lastWake + b[i]->invalidWakeSecs
-    
-            _lastWake = CFAbsoluteTimeGetCurrent();
-        
-            fire_date = _lastWake + (double)b[0]->invalidWakeSecs;
-        
-            timer_rls = CFRunLoopTimerCreate(
-                            NULL, fire_date, 0.0, 
-                            0, 0, _timeRemainingMaybeValid, NULL);
-            CFRunLoopAddTimer( CFRunLoopGetCurrent(), timer_rls, 
-                            kCFRunLoopDefaultMode);
-            CFRelease(timer_rls);
+            // Mark this discontinuity so we don't publish time remaining 
+            // estimates for a while.
+            _discontinuityOccurred();
         }
-        break;
-        
-    case kIOMessageSystemHasPoweredOn:
-        _impendingSleep = 0;
-        break;
     }
+}
+
+/* 
+ * A battery time remaining discontinuity has occurred
+ * Make sure we don't publish a time remaining estimate at all
+ * until a given period has elapsed.
+ */
+static void _discontinuityOccurred(void)
+{
+    IOPMBattery             **b = _batteries();
+    CFAbsoluteTime          lastDiscontinuity = 0.0;
+
+    // Pick a time X seconds into the future. Until then, all TimeRemaining
+    // estimates shall be considered invalid.
+    // We will check the current timestamp against:
+    // _lastWake + b[i]->invalidWakeSecs
+    // and ignore time remaining until that moment has past.
+    
+    if (!b || !b[0])
+        return;
+    
+    lastDiscontinuity = CFAbsoluteTimeGetCurrent();
+    _estimatesInvalidUntil = lastDiscontinuity + (double)b[0]->invalidWakeSecs;
+    
+    _ignoringTimeRemainingEstimates = true;
+    
+    // After the timeout has elapsed, re-read battery state & the now-valid
+    // time remaining.
+    if (_timeSettledTimer) {
+        CFRunLoopTimerInvalidate(_timeSettledTimer);
+        _timeSettledTimer = NULL;
+    }
+    _timeSettledTimer = CFRunLoopTimerCreate(
+                    NULL, _estimatesInvalidUntil, 0.0, 
+                    0, 0, _timeRemainingMaybeValid, NULL);
+    CFRunLoopAddTimer( CFRunLoopGetCurrent(), _timeSettledTimer, 
+                    kCFRunLoopDefaultMode);
+    CFRelease(_timeSettledTimer);
 }
 
 static void _timeRemainingMaybeValid(CFRunLoopTimerRef timer, void *info)
 {
-    // Trigger battery time remaining re-calculation now that current reading
-    // is valid.
+    // The timer has fired. Settings are probably valid.
+    _timeSettledTimer = NULL;
+    _ignoringTimeRemainingEstimates = false;
+
+    // Trigger battery time remaining re-calculation 
+    // now that current reading is valid.
     BatteryTimeRemainingBatteriesHaveChanged(NULL);
 }
 
@@ -181,43 +202,156 @@ static void     _initializeBatteryCalculations(void)
 __private_extern__ void
 BatteryTimeRemainingBatteriesHaveChanged(IOPMBattery **batteries)
 {
+    SCDynamicStoreRef           store = NULL;
+    static CFStringRef          lowBatteryKey = NULL;
+    static CFDictionaryRef      *old_battery = NULL;
     CFDictionaryRef             *result = NULL;
     int                         i;
-    int                         calculation_return = kNothingToSeeHere;
-    static SCDynamicStoreRef    store = NULL;
-    static CFDictionaryRef      *old_battery;
     int                         batCount = _batteryCount();
-
+    IOPMBattery                 *b = NULL;
+    bool                        external = false;
+    static bool                 _lastExternal = false;
+    
     if (!batteries) batteries = _batteries();
 
+    result = (CFDictionaryRef *) calloc(1, batCount * sizeof(CFDictionaryRef));
     if ( NULL == old_battery ) {
         old_battery = (CFDictionaryRef *) calloc(1, batCount * sizeof(CFDictionaryRef));
-        if ( NULL == old_battery ) {
-            // Uh-oh.
-            return;
-        }
-    }
-
-    result = (CFDictionaryRef *) calloc(1, batCount * sizeof(CFDictionaryRef));
-    if ( NULL == result ) {
-        // This isn't good.
+    }    
+    if ( NULL == old_battery || NULL == result ) {
         return;
     }
     
+    /* First, we have to determine if AC has changed since our last reading,
+     * since this effects our time remaining estimate.
+     */
+    b = batteries[0];
+    if (b->externalConnected) {
+        external = true;
+    }
+    if (_lastExternal != external) {
+        // If AC has changed, we must invalidate time remaining.
+        _discontinuityOccurred();
+    }
+    _lastExternal = external;
+    
+    /*
+     * Estimate N minutes until battery empty/full
+     */
     _populateTimeRemaining(batteries);
 
 
+    /* Display a system low battery warning?
+     * 
+     * No Warning == AC Power or >= 22% on battery
+     * Early Warning == On Battery with < 22%
+     * Final Warning == On Battery with < 10 Minutes
+     *
+     * Once we enter a "warning" state, we can only leave "warning"
+     * state by (1) having AC power re-applied, or (2) hibernating
+     * and waking with a new battery.
+     *     
+     * This prevents fluctuations in battery capacity from causing
+     * multiple battery warnings.
+     *
+     */
+    int             combinedTime    = 0;
+    int             newWarningLevel = 0;
+    double          combinedLevel   = 0;
+    bool            isPresent       = false;
+    static bool     _lastIsPresent  = false;
+
+    // clear warning history on wake from sleep
+    if (_warningsShouldResetForSleep)
+    {
+        _warningsShouldResetForSleep = false;
+        _systemBatteryWarningLevel = 0;
+    }
+
+    for(i=0; i<batCount; i++) 
+    {
+        b = batteries[i];
+        if (b->isPresent) {
+            isPresent = true;
+            combinedLevel += ((double)b->currentCap/(double)b->maxCap);
+            combinedTime += b->swCalculatedTR;
+        }
+    }
+    
+    /*
+     * Battery Inserted - new battery detected code here here
+     */ 
+    if (isPresent && !_lastIsPresent) 
+    {
+
+        // On boot, and on insertion of a new battery, we need to check whether
+        // we can trust this battery's estimate of time remaining.
+        _useBatteryTimeEstimate = _shouldTrustBatteryTimeEstimate(b);
+    }
+    _lastIsPresent = isPresent;
+    
+    int intLevel = lrint(combinedLevel * 100.0);
+    if (external)
+    {
+        // If we have AC power, then the warnings come down.
+        newWarningLevel = kIOPSLowBatteryWarningNone;
+    } else if (intLevel && combinedTime)
+    {
+        // non-zero data in combinedLevel && combinedTime
+        // implies a correct reading - continue.
+    
+        // It's invalid to go from showing any warning
+        // to then showing no warning, without application of AC power,
+        // or switching to a new battery.
+        if ( (intLevel >= 22) 
+            && (_systemBatteryWarningLevel != kIOPSLowBatteryWarningEarly)
+            && (_systemBatteryWarningLevel != kIOPSLowBatteryWarningFinal))
+        {
+            newWarningLevel = kIOPSLowBatteryWarningNone;
+        } else if (combinedTime < 10) {
+            newWarningLevel = kIOPSLowBatteryWarningFinal;
+        } else if (_systemBatteryWarningLevel != kIOPSLowBatteryWarningFinal)
+        {
+            // Early warning level if intLevel < 22 && combinedTime >= 10
+            // Also we disallow the warning level to popup from Final
+            // into early. The only ways out of Final are to (1) attach AC
+            // or (2) wake from sleep/hibernation with a battery.
+            newWarningLevel = kIOPSLowBatteryWarningEarly;
+        }
+    }
+    
     // At this point our algorithm above has populated the time remaining estimate
     // We'll package that info into user-consumable dictionaries below.
 
     _packageBatteryInfo(result);
 
-    // Publish the results of calculation in the SCDynamicStore
-    if(!store) store = SCDynamicStoreCreate(
-                                kCFAllocatorDefault, 
-                                CFSTR("PM configd plugin"), 
-                                NULL, 
-                                NULL);
+    if (!lowBatteryKey) {
+        lowBatteryKey = SCDynamicStoreKeyCreate(
+                            kCFAllocatorDefault, 
+                            CFSTR("%@%@"),
+                            kSCDynamicStoreDomainState, 
+                            CFSTR(kIOPSDynamicStoreLowBattPathKey));
+    }
+
+    // And publish the new warning level.        
+    if ( (newWarningLevel != _systemBatteryWarningLevel)
+        && (0 != newWarningLevel) ) 
+    {
+        CFNumberRef newWarningLevelNumber = 
+            CFNumberCreate(0, kCFNumberIntType, &newWarningLevel);
+        
+        if (newWarningLevelNumber) 
+        {
+            SCDynamicStoreSetValue( store, lowBatteryKey, newWarningLevelNumber );
+            CFRelease(newWarningLevelNumber); 
+            
+            notify_post( kIOPSNotifyLowBattery );
+        }
+        _systemBatteryWarningLevel = newWarningLevel;
+    }
+
+    store = _getSharedPMDynamicStore();
+    
     for(i=0; i<batCount; i++) {
         if(result[i]) {   
             // Determine if CFDictionary is new or has changed...
@@ -237,14 +371,30 @@ BatteryTimeRemainingBatteriesHaveChanged(IOPMBattery **batteries)
     if(result) free(result);
 }
 
+/* _shouldTrustBatteryTimeEstimate
+ *  - Intel Smart batteries provide a good time remaining to empty/to full estimate.
+ *  - Our older PPC batteries do not.
+ *  - Certain batteries (as indicated by the 'BALG' SMC key) can be trusted to
+ *      provide a reliable time remaining estimate. Other batteries shall not be 
+ *      trusted.
+ */
+static bool _shouldTrustBatteryTimeEstimate(IOPMBattery *b)
+{
+    bool            keyFound;
+    uint32_t        outVal;
+
+    keyFound = (kIOReturnSuccess == getSystemManagementKeyInt32('BALG', &outVal));
+
+    return  (keyFound && _batteryHas(b, CFSTR(kIOPMPSTimeRemainingKey)));
+}
 
 /* _populateTimeRemaining
- * Implicit inputs: battery state 
- * Implicit output: estimated value remaining placed in b->swCalculatedTR; or -1 if indeterminate
+ * Implicit inputs: battery state; battery's own time remaining estimate
+ * Implicit output: estimated time remaining placed in b->swCalculatedTR; or -1 if indeterminate
  *   returns true if we reached a valid estimate
  *   returns false if we're still calculating
  */
-int _populateTimeRemaining(IOPMBattery **batts)
+static int _populateTimeRemaining(IOPMBattery **batts)
 {
     int             ret_val = kNothingToSeeHere;
     int             i;
@@ -256,6 +406,7 @@ int _populateTimeRemaining(IOPMBattery **batts)
     double          absValAvgCurrent;
     double          absValInstantCurrent;
 
+    
     for(i=0; i<batCount; i++)
     {
         b = batts[i];
@@ -278,34 +429,53 @@ int _populateTimeRemaining(IOPMBattery **batts)
             upperAmperageBound = 15000;
         }
     
-        // ¥ If current is zero, finding a time remaining estimate is irrelevant
-        // (in the case of being fully charged) or impossible (in the case
-        // of having just plugged into AC and the PMU is thinking.
-        // ¥ Allowing for some slop in either direction of zero.
-        // ¥ We also check that average current is within a reasonable range of the instant
-        // current. We want to avoid 500 hour time remainings on wake from sleep; so we make
-        // sure the average amperage readings are sane.
-        // ¥ While operating, current should be roughly in the 1,000mA-2,000mA
-        // range. We allow for 5mA slop here.
-        
-        if( (absValAvgCurrent < lowerAmperageBound) ||
-            (absValAvgCurrent > upperAmperageBound) )
+    
+        // The following conditions invalidate a time remaining estimate.
+        // (1) If current is zero, finding a time remaining estimate is irrelevant
+        //       (in the case of being fully charged) or impossible (in the case
+        //       of having just plugged into AC).
+        // (2) We also check that average current is within a reasonable range 
+        //       of the instant current. We want to avoid 500 hour time remainings 
+        //       on wake from sleep; so we make sure the average amperage readings 
+        //       are sane.
+        // (3) For X seconds after wake from sleep, we cannot trust the time 
+        //       remaining estimate provided, whether we provide it ourselves
+        //       in SW, or we receive it from the battery.
+        //       The battery's kext may specify this time with the 
+        //       kIOPMPSInvalidWakeSecondsKey key.
+        if(    (0 == b->avgAmperage) 
+            || (absValAvgCurrent < lowerAmperageBound) 
+            || (absValAvgCurrent > upperAmperageBound) 
+            || _ignoringTimeRemainingEstimates)
         {
             b->swCalculatedTR = -1;
             continue;
         }
-        
-        if(b->isCharging)
+                
+        // We proceed to actually calculating the time remaining now...
+        if (_useBatteryTimeEstimate)
         {
-            // h = -mAh/mA
-            b->swCalculatedTR = 60*((double)(b->maxCap - b->currentCap)
-                                / (double)b->avgAmperage);
-                                
-        } else { // discharging
-            // h = mAh/mA
-            b->swCalculatedTR = -60*((double)b->currentCap
-                                / (double)b->avgAmperage);
-                                
+            /* Battery time remaining estimate is provided directly by the battery
+             * firmware (only on supported hardware).
+             */
+
+            b->swCalculatedTR = b->hwAverageTR;
+
+        } else {
+
+            /* Manually calculate battery time remaining.
+             * Expect this path on PPC.
+             */
+
+            if(b->isCharging) {
+                // h = -mAh/mA
+                b->swCalculatedTR = 60*((double)(b->maxCap - b->currentCap)
+                                    / (double)b->avgAmperage);                                
+            } else { // discharging
+                // h = mAh/mA
+                b->swCalculatedTR = -60*((double)b->currentCap
+                                    / (double)b->avgAmperage);
+            }
         }
 
         // Did our calculation come out negative? 
@@ -329,12 +499,86 @@ void _setBatteryHealthConfidence(
     CFMutableDictionaryRef  outDict, 
     IOPMBattery             *b)
 {
+    CFMutableArrayRef       permanentFailures = NULL;
+
     if(!outDict || !b) return;
 
     // no battery present? no health & confidence then!
     // If we return without setting the health and confidence values in
     // outDict, that is OK, it just means they were indeterminate.
     if( !b->isPresent ) return;
+
+
+    /** Report any failure status from the PFStatus register                          **/
+    /***********************************************************************************/
+    /***********************************************************************************/
+    if ( 0!= b->pfStatus) {
+        permanentFailures = CFArrayCreateMutable(kCFAllocatorDefault, 0,
+                                                &kCFTypeArrayCallBacks);
+        if (!permanentFailures)
+            return;
+
+        if (kSmartBattPFExternalInput & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureExternalInput) );
+        }
+
+        if (kSmartBattPFSafetyOverVoltage & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureSafetyOverVoltage) );
+        }
+
+        if (kSmartBattPFChargeSafeOverTemp & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureChargeOverTemp) );
+        }
+
+        if (kSmartBattPFDischargeSafeOverTemp & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureDischargeOverTemp) );
+        }
+
+        if (kSmartBattPFCellImbalance & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureCellImbalance) );
+        }
+
+        if (kSmartBattPFChargeFETFailure & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureChargeFET) );
+        }
+
+        if (kSmartBattPFDischargeFETFailure & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureDischargeFET) );
+        }
+
+        if (kSmartBattPFDataFlushFault & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureDataFlushFault) );
+        }
+
+        if (kSmartBattPFPermanentAFECommFailure & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailurePermanentAFEComms) );
+        }
+
+        if (kSmartBattPFPeriodicAFECommFailure & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailurePeriodicAFEComms) );
+        }
+
+        if (kSmartBattPFChargeSafetyOverCurrent & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureChargeOverCurrent) );
+        }
+
+        if (kSmartBattPFDischargeSafetyOverCurrent & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureDischargeOverCurrent) );
+        }
+
+        if (kSmartBattPFOpenThermistor & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureOpenThermistor) );
+        }
+
+        if (kSmartBattPFFuseBlown & b->pfStatus) {
+            CFArrayAppendValue( permanentFailures, CFSTR(kIOPSFailureFuseBlown) );
+        }
+
+        CFDictionarySetValue( outDict, 
+                CFSTR(kIOPSBatteryFailureModesKey), permanentFailures);
+        CFRelease(permanentFailures);
+    }
+
 
 
     // Permanent failure -> Poor health
@@ -347,15 +591,18 @@ void _setBatteryHealthConfidence(
             CFDictionarySetValue(outDict, 
                     CFSTR(kIOPSHealthConfidenceKey), CFSTR(kIOPSGoodValue));
             
+            // Specifically log that the battery condition is permanent failure
+            CFDictionarySetValue(outDict,
+                    CFSTR(kIOPSBatteryHealthConditionKey), CFSTR(kIOPSPermanentFailureValue));
+            
             return;
         }
     }
 
 
-    /* We must fend for ourselves and construct a poor/fair/good
-       estimate of battery health ourselves.
+    /* We must construct a poor/fair/good estimate of battery health.
 
-       Our preferred formula says:
+       Our formula says:
             ratio = MaxCap / DesignCap 
                     (ratio >= 80%) - Good Health
                     (ratio < 80%) && (CycleCount < 300) - Fair Health
@@ -380,6 +627,8 @@ void _setBatteryHealthConfidence(
             {
                 CFDictionarySetValue(outDict, 
                         CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSFairValue));
+                CFDictionarySetValue(outDict,
+                        CFSTR(kIOPSBatteryHealthConditionKey), CFSTR(kIOPSCheckBatteryValue));
             } else {
                 b->markedNeedsReplacement = false;
 
@@ -393,6 +642,9 @@ void _setBatteryHealthConfidence(
                 b->markedNeedsReplacement = true;
                 CFDictionarySetValue(outDict, 
                         CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSFairValue));
+                CFDictionarySetValue(outDict,
+                        CFSTR(kIOPSBatteryHealthConditionKey), CFSTR(kIOPSCheckBatteryValue));
+                        
             } else {
                 CFDictionarySetValue(outDict, 
                         CFSTR(kIOPSBatteryHealthKey), CFSTR(kIOPSGoodValue));
@@ -407,7 +659,7 @@ void _setBatteryHealthConfidence(
         return;
         
     } else {
-            // No design cap. We can't figure
+            // No design cap (as on PPC). We can't figure
             // out a thing about this battery's health!!!
             // So we leave the health properties unspecified.            
             return;
@@ -440,6 +692,21 @@ void _packageBatteryInfo(CFDictionaryRef *ret)
         mutDict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
                 &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         if(!mutDict) return;
+        
+        // Does the battery provide its own time remaining estimate?
+        if (_useBatteryTimeEstimate) {
+            CFDictionarySetValue(mutDict,
+                        CFSTR("Battery Provides Time Remaining"),
+                        kCFBooleanTrue);
+        }
+
+        // Are we in a time remaining black-out period due to a recent
+        // discontinuity?
+        if (_ignoringTimeRemainingEstimates) {
+            CFDictionarySetValue(mutDict,
+                        CFSTR("Waiting For Time Remaining Estimates"),
+                        kCFBooleanTrue);
+        }
         
         // Was there an error/failure? Set that.
         if (b->failureDetected) {

@@ -142,8 +142,8 @@ IOReturn AppleSmartBatteryManager::performExternalTransaction(
     IOByteCount inSize,
     IOByteCount *outSize)    
 {
-    int                     i;
-    int                     retryAttempts = 0;
+    uint16_t                i;
+    uint16_t                retryAttempts = 0;
     IOSMBusTransaction      newTransaction;
     IOReturn                transactionSuccess;
     EXSMBUSInputStruct      *inSMBus = (EXSMBUSInputStruct *)in;
@@ -190,6 +190,18 @@ IOReturn AppleSmartBatteryManager::performExternalTransaction(
                 newTransaction.protocol = kIOSMBusProtocolReadBlock;
                 newTransaction.sendDataCount = 0;
                 break;
+            case kEXWriteByte:
+                newTransaction.protocol = kIOSMBusProtocolWriteByte;
+                newTransaction.sendDataCount = 1;
+                break;
+            case kEXReadByte:
+                newTransaction.protocol = kIOSMBusProtocolReadByte;
+                newTransaction.sendDataCount = 0;
+                break;
+            case kEXSendByte:
+                newTransaction.protocol = kIOSMBusProtocolSendByte;
+                newTransaction.sendDataCount = 0;
+                break;
             default:
                 return kIOReturnBadArgument;
         }
@@ -205,9 +217,13 @@ IOReturn AppleSmartBatteryManager::performExternalTransaction(
         }
     
     
-        if ( (inSMBus->flags & kEXFlagRetry) 
-              && (retryAttempts > 0))
+        if (inSMBus->flags & kEXFlagRetry) 
         {
+            if (retryAttempts >= kMaxRetries) {
+                // Don't read off the end of the table...
+                retryAttempts = kMaxRetries - 1;
+            }
+    
             // If this is a retry-on-failure, spin for a few microseconds
             IODelay( retryDelaysTable[retryAttempts] );
         }
@@ -258,7 +274,8 @@ IOReturn AppleSmartBatteryManager::performExternalTransaction(
 
     /* Output: read word/read block results */    
     if (((kIOSMBusProtocolReadWord == newTransaction.protocol)
-         || (kIOSMBusProtocolReadBlock == newTransaction.protocol))
+         || (kIOSMBusProtocolReadBlock == newTransaction.protocol)
+         || (kIOSMBusProtocolReadByte == newTransaction.protocol))
         && (kIOSMBusStatusOK == newTransaction.status))
     {
         outSMBus->outByteCount = newTransaction.receiveDataCount;
@@ -499,14 +516,14 @@ bool AppleSmartBatteryManager::requestExclusiveSMBusAccess(
 
     fExclusiveUserClient = request;
 
-    /* Signal the battery to either:
-        - stop polling
-        - begin polling anew
+    /* Signal our driver, and the SMC firmware to either:
+        - stop communicating with the battery
+        - resume communications
      */
     fBatteryGate->runAction(
                     OSMemberFunctionCast( 
                         IOCommandGate::Action, this,
-                        &AppleSmartBattery::handleUCStalled),
+                        &AppleSmartBattery::handleExclusiveAccess),
                     (void *)request, NULL, NULL, NULL);
 
     return true;
@@ -567,7 +584,6 @@ void AppleSmartBatteryManager::gatedSendCommand(
                       this, &AppleSmartBatteryManager::transactionCompletion),
                     (OSObject *)this);
                     
-exit:
     return;
 }
 
@@ -628,7 +644,7 @@ bool AppleSmartBatteryManager::transactionCompletion(
     return false;
 }
 
-void BattLog(char *fmt, ...)
+void BattLog(const char *fmt, ...)
 {
 #if 0
     va_list     listp;
