@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2008 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -20,24 +20,21 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
-/*
- * Copyright (c) 2003 Apple Computer, Inc.  All rights reserved. 
- *
- * HISTORY
- *
- * 30-Jan-03 ebold created
- *
- */
  
-#ifndef _AutoWakeScheduler_h_
-#define _AutoWakeScheduler_h_
+#ifndef _SystemLoad_h_
+#define _SystemLoad_h_
 
-__private_extern__ void AutoWake_prime(void);
- 
-__private_extern__ void AutoWakeSleepWakeNotification(natural_t messageType, int runState);
 
-__private_extern__ void AutoWakePrefsHaveChanged(void);
+__private_extern__ void SystemLoad_prime(void);
 
-__private_extern__ void AutoWakePMUInterestNotification(natural_t messageType, UInt32 messageArgument);
+__private_extern__ void SystemLoadBatteriesHaveChanged(IOPMBattery **batt_stats);
 
-#endif // _AutoWakeScheduler_h_
+__private_extern__ void SystemLoadCPUPowerHasChanged(CFDictionaryRef newCPU);
+
+__private_extern__ void SystemLoadUserStateHasChanged(void);
+
+__private_extern__ void SystemLoadDisplayPowerStateHasChanged(bool displayIsOff);
+
+__private_extern__ void SystemLoadPrefsHaveChanged(void);
+
+#endif
