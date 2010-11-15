@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2010 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -20,20 +20,10 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
- 
-#ifndef _SystemLoad_h_
-#define _SystemLoad_h_
 
-__private_extern__ void SystemLoad_prime(void);
+#ifndef __ExternalMedia_h__
+#define __ExternalMedia_h__
 
-__private_extern__ void SystemLoadBatteriesHaveChanged(IOPMBattery **batt_stats);
-
-__private_extern__ void SystemLoadCPUPowerHasChanged(CFDictionaryRef newCPU);
-
-__private_extern__ void SystemLoadUserStateHasChanged(void);
-
-__private_extern__ void SystemLoadDisplayPowerStateHasChanged(bool displayIsOff);
-
-__private_extern__ void SystemLoadPrefsHaveChanged(void);
+__private_extern__ void ExternalMedia_prime(void);
 
 #endif
