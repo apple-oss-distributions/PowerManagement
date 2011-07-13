@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2009 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -20,26 +20,33 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
-/*
- *  PMTestLib.h
- *  SULeoGaia Verification
- *
- *  Created by Ethan Bold on 8/4/08.
- *  Copyright 2008 Apple. All rights reserved.
- *
- */
- 
-#ifndef __PMTESTLIB__
-#define __PMTESTLIB__
 
-#include <stdio.h>
-#include <IOKit/IOReturn.h>
+#ifndef _PMDriverAssertionExerciser_
+#define _PMDriverAssertionExerciser_
+
+#include <IOKit/IOService.h>
+#include <IOKit/pwr_mgt/IOPM.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
  
-/* BatteryCheck
- * @param batteryPresent On return, reflects battery presence. May be NULL.
- * @param acPresent On return, reflects AC presence. May be NULL.
- * @result Returns kIOReturnSuccess on success; otherwise on failure 
- */
-//IOReturn batteryCheck(bool *batteryPresent, bool *acPresent);
+class PMDriverAssertionExerciser : public IOService
+{
+    OSDeclareDefaultStructors(PMDriverAssertionExerciser)
+    
+private:
+    IOPMrootDomain          *rootDomain;
+    
+    IOPMDriverAssertionID   myAssertion;
+    IOTimerEventSource      *myTimer;
+    
+    bool        doGetAndSetTest( void );
+    bool        doCreateAndReleaseTest( void );
+    
+public:
+    bool        start( IOService * );
+    void        stop ( IOService * );
+
+    void        PMDriverTimerAction(OSObject *, IOTimerEventSource *);
+    IOReturn    setProperties( OSObject * properties );
+};
 
 #endif

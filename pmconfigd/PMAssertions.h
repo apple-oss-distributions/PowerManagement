@@ -28,11 +28,21 @@
  * 29-Aug-02 ebold created
  *
  */
-#ifndef _PMSetActive_h_
-#define _PMSetActive_h_
+#ifndef _PMAssertions_h_
+#define _PMAssertions_h_
+
+#include <IOKit/pwr_mgt/IOPM.h>
+
+/* ExternalMedia assertion
+ * This assertion is only defined here in PM configd. 
+ * It can only be asserted by PM configd; not by other user processes.
+ */
+#define _kIOPMAssertionTypeExternalMediaCStr    "ExternalMedia"
+#define _kIOPMAssertionTypeExternalMedia    CFSTR(_kIOPMAssertionTypeExternalMediaCStr)
+
+
  
 __private_extern__ void PMAssertions_prime(void);
-__private_extern__ bool PMAssertionsHandleDeadName(mach_port_t dead_port);
 
 __private_extern__ IOReturn _IOPMSetActivePowerProfilesRequiresRoot(
                                 CFDictionaryRef which_profile, 
@@ -48,4 +58,18 @@ __private_extern__ IOReturn _IOPMAssertionCreateRequiresRoot(
 
 __private_extern__ void _TaskPortInvalidatedCallout(CFMachPortRef port, void *info);
 
-#endif _PSLowPower_h_
+__private_extern__ void _PMAssertionsDriverAssertionsHaveChanged(uint32_t changedDriverAssertions);
+
+__private_extern__ void _ProxyAssertions(const struct IOPMSystemCapabilityChangeParameters *capArgs);
+
+
+__private_extern__ IOReturn InternalCreateAssertion(
+                                CFDictionaryRef properties, 
+                                IOPMAssertionID *outID);
+
+__private_extern__ void InternalReleaseAssertion(
+                                IOPMAssertionID *outID);
+
+__private_extern__ void InternalEvaluateAssertions(void);
+
+#endif

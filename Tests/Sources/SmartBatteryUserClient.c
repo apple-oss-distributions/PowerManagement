@@ -30,8 +30,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
-#include <XILog/XILog.h>
-
+#include "PMTestLib.h"
 #include <stdio.h>
 #include <unistd.h>
 
@@ -44,6 +43,8 @@
 #define     kUCExclusiveIterationsCount           10
 #define     kUCIterationsCount                    25
 
+#define kMaxSimultaneousConnections             3
+
 enum {
     kBatteryExclusiveAccessType = 1
 };
@@ -52,6 +53,7 @@ io_connect_t                connectSmartBatteryManager(uint32_t options, IORetur
 
 int main(int argc, char *argv[]) {
     io_connect_t    manager_connect = IO_OBJECT_NULL;
+    io_connect_t    manager[kMaxSimultaneousConnections];
 
     uint32_t    openfailure = 0;
     uint32_t    closefailure = 0;
@@ -62,22 +64,54 @@ int main(int argc, char *argv[]) {
     CFAbsoluteTime      start_time = 0.0;
     CFAbsoluteTime      end_time = 0.0;
     CFTimeInterval      elapsed_time = 0.0;
-
-    char *XIconfig = NULL;
-    int XIecho = true;
-    int XIxml = false;
-    char *XILogPath = NULL;
-    XILogRef logRef = XILogOpenLog(XILogPath, "SmartBatteryUserClient", "com.apple.iokit.ethan", XIconfig, XIxml, XIecho);
+    io_registry_entry_t IOREG_SmartBattery = IO_OBJECT_NULL;
+    int                 simultaneousCount = 0;
     
-    XILogBeginTestCase(logRef, "SmartBatteryUserClientTest", "Create and destroy many user clients in series.");
+    PMTestInitialize("SmartBatteryUserClient repetition test", "com.apple.iokit.smartbattery.repeater");
+
+/* 
+ * Make sure we can open a few simultaneous user clients
+ */    
+    for(simultaneousCount=0; simultaneousCount < kMaxSimultaneousConnections; simultaneousCount++) {
+    
+        manager[simultaneousCount] = connectSmartBatteryManager(0, &connectreturn);
+        if (kIOReturnSuccess != connectreturn) {
+            manager[simultaneousCount] = 0;
+            PMTestFail("Failed to open non-exclusive user client #%d of %d. Status = 0x%08x", 
+                simultaneousCount, kMaxSimultaneousConnections, connectreturn);
+        } else {
+            PMTestPass("Opened non-exclusive user client depth %d", simultaneousCount);
+        }
+    }
+    
+    IOREG_SmartBattery = IOServiceGetMatchingService( MACH_PORT_NULL,
+                            IOServiceNameMatching(kBatteryManagerName) );
+    if (IO_OBJECT_NULL == IOREG_SmartBattery) {
+        PMTestLog("This machine does not support batteries. Skipping battery tests.");
+        exit(0);
+    }
+    IOObjectRelease(IOREG_SmartBattery);
+    
+    for (simultaneousCount = kMaxSimultaneousConnections-1; simultaneousCount >= 0; simultaneousCount--)
+    {
+        if (!manager[simultaneousCount]) {
+            PMTestLog("ODDITY: Trying to close connection %d - but NULL connection ID", simultaneousCount);
+            continue;
+        }
+        connectreturn = IOServiceClose(manager[simultaneousCount]);
+        if (kIOReturnSuccess != connectreturn) {
+            PMTestFail("Failed to CLOSE non-exclusive user client #%d of %d. Status = 0x%08x", 
+                    simultaneousCount, kMaxSimultaneousConnections, connectreturn);
+        } else {
+            PMTestPass("Closed user client at depth %d", simultaneousCount);
+        }
+    }
     
     while ( (ucOpenedCount < kUCIterationsCount) && (ucExclusiveOpenedCount < kUCExclusiveIterationsCount))
     {
-    
 /* 
  * Regular user client
- */
-    
+ */    
         if (ucOpenedCount < kUCIterationsCount)
         {
             /* OPEN REGULAR */
@@ -85,15 +119,15 @@ int main(int argc, char *argv[]) {
             manager_connect = connectSmartBatteryManager(0, &connectreturn);
             if (MACH_PORT_NULL == manager_connect) 
             {
-                XILogErr("IOServiceOpen error 0x%08x opening %s\n", connectreturn, kBatteryManagerName);
+                PMTestFail("IOServiceOpen error 0x%08x opening %s", connectreturn, kBatteryManagerName);
                 openfailure++;
             } else {
                 end_time = CFAbsoluteTimeGetCurrent();
                 
                 elapsed_time = end_time - start_time;
-                XILogMsg("User client opened successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
+                PMTestPass("User client opened successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
                 if (elapsed_time > kMaxSecondsUCOperation) {
-                    XILogErr("Error - opening user client took %d.%02d, exceeding %d.%02d", 
+                    PMTestFail("Error - opening user client took %d.%02d, exceeding %d.%02d", 
                                     (int)elapsed_time, (int)(100.0 * elapsed_time)%100,
                                     (int)kMaxSecondsUCOperation, (int)(100.0*kMaxSecondsUCOperation)%100);
                 }
@@ -102,15 +136,15 @@ int main(int argc, char *argv[]) {
                 start_time = CFAbsoluteTimeGetCurrent();
                 kernreturn = IOServiceClose(manager_connect);
                 if (KERN_SUCCESS != kernreturn) {
-                    XILogErr("IOServiceClose error %d closing user client.", kernreturn);
+                    PMTestFail("IOServiceClose error %d closing user client.", kernreturn);
                     closefailure++;
                 } else {
                     end_time = CFAbsoluteTimeGetCurrent();
                     
                     elapsed_time = end_time - start_time;
-                    XILogMsg("User client closed successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
+                    PMTestPass("User client closed successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
                     if (elapsed_time > kMaxSecondsUCOperation) {
-                        XILogErr("Error - closing user client took %d.%02d, exceeding %d.%02d", 
+                        PMTestFail("Error - closing user client took %d.%02d, exceeding %d.%02d", 
                                         (int)elapsed_time, (int)(100.0 * elapsed_time)%100,
                                         (int)kMaxSecondsUCOperation, (int)(100.0*kMaxSecondsUCOperation)%100);
                     }
@@ -130,15 +164,16 @@ int main(int argc, char *argv[]) {
             manager_connect = connectSmartBatteryManager(kBatteryExclusiveAccessType, &connectreturn);
             if (MACH_PORT_NULL == manager_connect) 
             {
-                XILogErr("IOServiceOpen error 0x%08x opening exclusive %s", connectreturn, kBatteryManagerName);
+                //PMTestFail
+                PMTestLog("IOServiceOpen error 0x%08x opening exclusive %s (This test requires root privileges; this may be a failure)", connectreturn, kBatteryManagerName);
                 openfailure++;
             } else {
                 end_time = CFAbsoluteTimeGetCurrent();
                 
                 elapsed_time = end_time - start_time;
-                XILogMsg("User client EXCLUSIVE opened successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
+                PMTestPass("User client EXCLUSIVE opened successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
                 if (elapsed_time > kMaxSecondsUCOperation) {
-                    XILogErr("Error - opening EXCLUSIVE user client took %d.%02d, exceeding %d.%02d", 
+                    PMTestFail("Error - opening EXCLUSIVE user client took %d.%02d, exceeding %d.%02d", 
                                     (int)elapsed_time, (int)(100.0 * elapsed_time)%100,
                                     (int)kMaxSecondsUCOperation, (int)(100.0*kMaxSecondsUCOperation)%100);
                 }
@@ -146,15 +181,15 @@ int main(int argc, char *argv[]) {
                 start_time = CFAbsoluteTimeGetCurrent();
                 kernreturn = IOServiceClose(manager_connect);
                 if (KERN_SUCCESS != kernreturn) {
-                    XILogErr("IOServiceClose error %d closing user client.", kernreturn);
+                    PMTestFail("IOServiceClose error %d closing user client.", kernreturn);
                     closefailure++;
                 } else {
                     end_time = CFAbsoluteTimeGetCurrent();
                     
                     elapsed_time = end_time - start_time;
-                    XILogMsg("User client EXCLUSIVE closed successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
+                    PMTestPass("User client EXCLUSIVE closed successfully in %d.%02d seconds", (int)elapsed_time, (int)(100.0 * elapsed_time)%100);
                     if (elapsed_time > kMaxSecondsUCOperation) {
-                        XILogErr("Error - closing EXCLUSIVE user client took %d.%02d, exceeding %d.%02d", 
+                        PMTestFail("Error - closing EXCLUSIVE user client took %d.%02d, exceeding %d.%02d", 
                                         (int)elapsed_time, (int)(100.0 * elapsed_time)%100,
                                         (int)kMaxSecondsUCOperation, (int)(100.0*kMaxSecondsUCOperation)%100);
                     }
@@ -165,22 +200,22 @@ int main(int argc, char *argv[]) {
         
     }
 
-    XILogMsg("SmartBatteryUserClient test completed: opened %d clients and %d exclusive clients", 
+    PMTestLog("SmartBatteryUserClient test completed: opened %d clients and %d exclusive clients", 
                                         ucOpenedCount, ucExclusiveOpenedCount);
 
     if (openfailure == 0 && closefailure == 0)
     {
-        XILogMsg("Success.");
+        PMTestLog("Success.");
     } else {
         if (openfailure) {
-            XILogMsg("Test completed with %d failures opening the user client.", openfailure);
+            PMTestLog("Test completed with %d failures opening the user client.", openfailure);
         }
         if (closefailure) {
-            XILogMsg("Test completed with %d failures closing the user client.", closefailure);
+            PMTestLog("Test completed with %d failures closing the user client.", closefailure);
         }
     }
 
-    XILogEndTestCase(logRef, kXILogTestPassOnErrorLevel);
+    PMTestLog("The test is over.");
 
     return 0;
 }

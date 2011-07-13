@@ -25,11 +25,13 @@
 #include <SystemConfiguration/SCValidation.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/pwr_mgt/IOPMLibPrivate.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
 
-#include <XILog/XILog.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+
+
 
 
 /*
@@ -39,11 +41,17 @@
  *
  */
 
+#define PMTestLog printf
+#define PMTestPass printf
+#define PMTestFail printf
+
 #define kSystemMaxAssertionsAllowed 64
 
-#define kInvalidNamesCount  2
+#define kLongNamesCount  2
 
-const char *invalidNames[] =
+#define kKnownGoodAssertionType     CFSTR("NoDisplaySleepAssertion")
+
+const char *LongNames[] =
     {
 "••000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000•••••••••••••••00000",
         "00005555555566666666666666667777777777777777700000000000AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA000000000000000XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
@@ -73,49 +81,47 @@ static CFStringRef createFunnyAssertionName(void)
                         kCFStringEncodingMacRoman);
 }
 
-static CFStringRef createInvalidAssertionName(void)
+static CFStringRef createLongAssertionName(void)
 {
     static int i = 0;
 
     return CFStringCreateWithCString(0, 
-                        invalidNames[i++ % kInvalidNamesCount],    
+                        LongNames[i++ % kLongNamesCount],    
                         kCFStringEncodingMacRoman);
-};
+}
+
+static bool AssertionIsSupported(CFStringRef assertionname)
+{
+    // Assertion type EnableIdleSleep is unsupported on desktop. Do not run it.
+    return !CFEqual(assertionname, kIOPMAssertionTypeEnableIdleSleep);
+}
+
+void Test_runthroughonce(void);
 
 int main()
 {
-     char *XIconfig = NULL;
-     int XIecho = true;
-     int XIxml = false;
-
-	char *XILogPath = NULL; //"~/Desktop/AssertEach.log";
-
-    // 
-    // XILog Initialization
-    //
-     XILogRef logRef = XILogOpenLog(XILogPath, "PMAssertions", "com.apple.iokit.ethan", XIconfig, XIxml, XIecho);
-     if(logRef == NULL)
+    IOReturn        ret = 0;
+    
+    //     ret = PMTestInitialize("PMAssertions", "com.apple.iokit.powertesting");
+     if(kIOReturnSuccess != ret)
      {
-         fprintf(stderr,"Couldn't create log: %s", XILogPath ? XILogPath : "(NULL)");
-         exit(-1);
+         fprintf(stderr,"PMTestInitialize failed with IOReturn error code 0x%08x\n", ret);
+	 //         exit(-1);
      }
 
-    Test_runthroughonce(logRef);
-
-    Test_loderunner();
+    Test_runthroughonce();
 
     return 0;
 }
 
 
-void Test_runthrughonce(XILogRef logRef)
+void Test_runthroughonce(void)
 {
     CFDictionaryRef     currentAssertionsStatus = NULL;
+    CFMutableDictionaryRef  editedAssertionsStatus = NULL;
     IOReturn            ret;
-
     CFStringRef         *listAssertions = NULL;
     int                 assertionsCount = 0;
-    
     IOPMAssertionID     *assertionIDArray = NULL;
     int                 i;
 
@@ -130,14 +136,20 @@ void Test_runthrughonce(XILogRef logRef)
             ret, currentAssertionsStatus);
     }
     
-    assertionsCount = CFDictionaryGetCount(currentAssertionsStatus);
+    editedAssertionsStatus = CFDictionaryCreateMutableCopy(0, 0, currentAssertionsStatus);
+    CFRelease(currentAssertionsStatus);
+    currentAssertionsStatus = NULL;
+    
+    CFDictionaryRemoveValue(editedAssertionsStatus, kIOPMAssertionTypeEnableIdleSleep);
+    
+    assertionsCount = CFDictionaryGetCount(editedAssertionsStatus);
 
     listAssertions = (CFStringRef *)calloc(assertionsCount, sizeof(void *));
 
     assertionIDArray = (IOPMAssertionID *)calloc(assertionsCount, sizeof(IOPMAssertionID));
 
     CFDictionaryGetKeysAndValues(
-                        currentAssertionsStatus, 
+                        editedAssertionsStatus, 
                         (const void **)listAssertions,
                         (const void **)NULL);
 
@@ -146,9 +158,7 @@ void Test_runthrughonce(XILogRef logRef)
     /**************************************************************************/
     /* Test: Assert one at a time *****/
 
-    XILogBeginTestCase(logRef, "AssertAndReleaseTest", "Can we assert and release assertions individually.");
-    
-    XILogMsg("Assert and Release test will run %d assertions.", assertionsCount);
+    PMTestLog("Assert and Release test will run %d assertions.", assertionsCount);
     
     for (i=0; i<assertionsCount; i++)
     {
@@ -156,32 +166,39 @@ void Test_runthrughonce(XILogRef logRef)
         
         CFStringGetCString(listAssertions[i], cStringName, 100, kCFStringEncodingMacRoman);
 
-        XILogMsg("(%d) Creating assertion with name %s", i, cStringName);
+        PMTestLog("(%d) Creating assertion with name %s", i, cStringName);
 
         ret = IOPMAssertionCreate(
                             listAssertions[i],
                             kIOPMAssertionLevelOn, 
                             &assertionIDArray[i]);
 
-        if (kIOReturnSuccess != ret)
+        if (kIOReturnUnsupported == ret) {
+            // This might be a valid, yet unsupported on this platform, assertion. Like EnableIdleSleep - it's 
+            // only supported on embedded. Let's just work around that for now.
+            listAssertions[i] = kKnownGoodAssertionType;
+            PMTestLog("IOPMAssertionCreate #%d %s returns kIOReturnUnsupported(0x%08x) - skipping this assertion type from now on\n", i, cStringName, ret);
+        } else if (kIOReturnSuccess != ret)
         {
-            XILogErr("Create assertion #%d %s returns 0x%08x", i, cStringName, ret);
+            PMTestFail("Create assertion #%d %s returns 0x%08x", i, cStringName, ret);
         }
 
-        ret = IOPMAssertionRelease(assertionIDArray[i]);
-        if (kIOReturnSuccess != ret) {
-            XILogErr("Release assertion #%d %s returns 0x%08x", i, cStringName, ret);
+        if (kIOReturnSuccess == ret)
+        {
+            ret = IOPMAssertionRelease(assertionIDArray[i]);
+            if (kIOReturnSuccess != ret) {
+                PMTestFail("Release assertion #%d %s returns 0x%08x", i, cStringName, ret);
+            }
         }
-		
     }
 
-    XILogEndTestCase(logRef, kXILogTestPassOnErrorLevel);
+    PMTestPass("AssertAndReleaseTest");
+    
     
 /***** All at once *****/
 
-    XILogBeginTestCase(logRef, "AssertAndReleaseSimultaneousTest", "Can we assert and release assertions individually.");
-    
-    XILogMsg("Creating all %d assertions simultaneously, then releasing them.", assertionsCount);
+
+    PMTestLog("Creating all %d assertions simultaneously, then releasing them.", assertionsCount);
 
     for (i=0; i<assertionsCount; i++)
     {
@@ -197,7 +214,7 @@ void Test_runthrughonce(XILogRef logRef)
     
         if (kIOReturnSuccess != ret)
         {
-            XILogErr("Create assertion #%d %s returns 0x%08x", i, cStringName, ret);
+            PMTestFail("Create assertion #%d %s returns 0x%08x", i, cStringName, ret);
         }
     }
 
@@ -211,45 +228,45 @@ void Test_runthrughonce(XILogRef logRef)
 
         if (kIOReturnSuccess != ret) 
         {
-            XILogErr("Release assertion #%d %s returns 0x%08x", i, cStringName, ret);    
+            PMTestFail("Release assertion #%d %s returns 0x%08x", i, cStringName, ret);    
         }
     }
     
-    XILogEndTestCase(logRef, kXILogTestPassOnErrorLevel);
+    PMTestPass("AssertAndReleaseSimultaneousTest");
 
-#if 1
-        return 0;
-    }
-#else
 
 /***** Assert Bogus Names *****/
-    XILogBeginTestCase(logRef, "AssertBogus", "Assert invalid assertion names; expecting errors.");
-    XILogMsg("Creating %d assertions with invalid names.", kInvalidNamesCount);
+    PMTestLog("Creating %d assertions with long names.", kLongNamesCount);
 
-    for (i=0; i<kInvalidNamesCount; i++)
+    for (i=0; i<kLongNamesCount; i++)
     {
-        CFStringRef invalidName = createInvalidAssertionName();
+        CFStringRef longName = createLongAssertionName();
     
-		XILogMsg("(%d) Asserting bogus name %s", i, CFStringGetCStringPtr(invalidName, kCFStringEncodingMacRoman));
+        PMTestLog("(%d) Asserting bogus name", i);
 	
         ret = IOPMAssertionCreateWithName(
                             listAssertions[0],
                             kIOPMAssertionLevelOn, 
-                            invalidName,
+                            longName,
                             &assertionIDArray[i]);
     
-        if (kIOReturnBadArgument != ret) {
-            XILogErr("Create invalid named assertion #%d returns 0x%08x", i, ret);
+        if (kIOReturnSuccess != ret) {
+            PMTestFail("Create long named assertion #%d returns 0x%08x", i, ret);
         }
-        CFRelease(invalidName);
+        CFRelease(longName);
+
+    
+        ret = IOPMAssertionRelease(assertionIDArray[i]);
+        if (kIOReturnSuccess != ret) {
+            PMTestFail("IOPMAssertionRelease LONG (%d) returns 0x%08x", i, ret);
+        }
     }
-    XILogEndTestCase(logRef, kXILogTestPassOnErrorLevel);
+    PMTestPass("Assert Long Names");
 
 
 /***** All at once with names *****/
 
-    XILogBeginTestCase(logRef, "AssertWithNameSimultaneous", "Assert several assertions with names simultaneously.");
-    XILogMsg("Creating %d named assertions simultaneously, then releasing them.", assertionsCount);
+    PMTestLog("Creating %d named assertions simultaneously, then releasing them.", assertionsCount);
     for (i=0; i<assertionsCount; i++)
     {
     
@@ -269,7 +286,7 @@ void Test_runthrughonce(XILogRef logRef)
     
         if (kIOReturnSuccess != ret)
         {
-            XILogErr("Create named assertion #%d name=%s type=%s returns 0x%08x", i, cfStringAssertionName, cfStringName, ret);
+            PMTestFail("Create named assertion #%d name=%s type=%s returns 0x%08x", i, cfStringAssertionName, cfStringName, ret);
         }
         
         CFRelease(funnyName);
@@ -285,10 +302,10 @@ void Test_runthrughonce(XILogRef logRef)
 
         if (kIOReturnSuccess != ret)
         {
-            XILogErr("Release assertion #%d %s returns 0x%08x", i, cStringName, ret);    
+            PMTestFail("Release assertion #%d %s returns 0x%08x", i, cStringName, ret);    
         }
     }
-    XILogEndTestCase(logRef, kXILogTestPassOnErrorLevel);
+    PMTestPass("Assert several named assertions at once (creation calls are serialized)");
 
 
 
@@ -296,8 +313,7 @@ void Test_runthrughonce(XILogRef logRef)
 
 #define kDoManyManyAssertionsCount  70
 
-    XILogBeginTestCase(logRef, "AssertMoreThanAllowed", "Assert greater than MAX_ASSERTIONS = 64.");
-    XILogMsg("Creating %d assertions to exceed the system's per-process PM assertion limit.",
+    PMTestLog("Creating %d assertions to exceed the system's per-process PM assertion limit.",
             kDoManyManyAssertionsCount);
 
     IOPMAssertionID     manyAssertions[kDoManyManyAssertionsCount];
@@ -308,6 +324,16 @@ void Test_runthrughonce(XILogRef logRef)
     {
         IOReturn        ret;
         CFStringRef     funnyName = createFunnyAssertionName();
+
+
+        // If we happen to assert an embedded only assertion, we don't want to get failures 
+        // out of our tests for it.
+        int useListIndex = i % assertionsCount;
+        while (!AssertionIsSupported(listAssertions[ useListIndex ]))
+        {
+            // So we'll try the next assertion in the list.
+            useListIndex++;
+        }
 
         ret = IOPMAssertionCreateWithName(
                             listAssertions[ i % assertionsCount ],
@@ -320,14 +346,14 @@ void Test_runthrughonce(XILogRef logRef)
 
             if (kIOReturnSuccess != ret)
             {
-                XILogErr("Assert 70+ assertions failed: i=%d, ret=0x%08x, AssertionID=%d",
-                        i, ret, manyAssertions[i]);
+                PMTestFail("Assert 70+ assertions failed: (i=%d)<(max=%d), ret=0x%08x, AssertionID=%d",
+                        i, kSystemMaxAssertionsAllowed, ret, manyAssertions[i]);
             }      
         } else {
             if (kIOReturnNoMemory != ret) 
             {
-                XILogErr("Assert 70+ assertions failed (ret != 0x%08x): i=%d, ret=0x%08x, AssertionID=%d",
-                    kIOReturnNoMemory, i, ret, manyAssertions[i]);
+                PMTestFail("Assert 70+ assertions failed (ret = 0x%08x; expected = 0x%08x): i=%d, ret=0x%08x, AssertionID=%d",
+                    ret, kIOReturnNoMemory, i, ret, manyAssertions[i]);
             }
         }
 
@@ -345,20 +371,17 @@ void Test_runthrughonce(XILogRef logRef)
 
             if (kIOReturnSuccess != ret)
             {
-                XILogErr("Assert 70+ assertion-release failed: i=%d, ret=0x%08x, AssertionID=%d",
+                PMTestFail("Assert 70+ assertion-release failed: i=%d, ret=0x%08x, AssertionID=%d",
                         i, ret, manyAssertions[i]);
             }      
         } else {
-            if (kIOReturnNotFound != ret)
+            if (kIOReturnSuccess == ret)
             {
-                XILogErr("Assert 70+ assertion-release failed (ret != 0x%08x): i=%d, ret=0x%08x, AssertionID=%d",
-                        kIOReturnNoMemory, i, ret, manyAssertions[i]);
+                PMTestFail("Assert 70+ assertion-release failed (ret == 0x%08x): i=%d, ret=0x%08x, AssertionID=%d",
+                        kIOReturnSuccess, i, ret, manyAssertions[i]);
             }
         }
     }
-    XILogEndTestCase(logRef, kXILogTestPassOnErrorLevel);
+    PMTestPass("Assert more assertions than allowed per-process");
 }
 
-
-
-#endif // MAC_OS_X_VERSION_MAX_ALLOWED > MAC_OS_X_VERSION_10_5

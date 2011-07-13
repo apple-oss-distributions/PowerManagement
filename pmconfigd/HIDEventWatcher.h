@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2010 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -20,24 +20,20 @@
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
-/*
- *  PMTestLib.c
- *  SULeoGaia Verification
- *
- *  Created by Ethan Bold on 8/4/08.
- *  Copyright 2008 Apple. All rights reserved.
- *
- */
+#include "PrivateLib.h"
 
+#ifndef _HIDEvent_h_
+#define _HIDEvent_h_
 
-#include <IOKit/IOReturn.h>
-#include "PMTestLib.h"
-#include <CoreFoundation/CoreFoundation.h>
+__private_extern__ kern_return_t _io_pm_hid_event_report_activity(
+    mach_port_t server,
+    audit_token_t token,                                                        
+    int         _action);
 
-IOReturn batteryCheck(bool *batteryPresent, bool *acPresent)
-{
+__private_extern__ kern_return_t _io_pm_hid_event_copy_history(
+            mach_port_t     server,
+            vm_offset_t     *array_data,
+            mach_msg_type_number_t  *array_dataLen,
+            int             *return_val);
 
-    return kIOReturnNotOpen;
-}
-
-
+#endif

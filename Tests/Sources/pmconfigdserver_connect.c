@@ -34,23 +34,19 @@
 #include <IOKit/IOKitLib.h>
 #include <IOKit/pwr_mgt/IOPMLibPrivate.h>
 
-#include <XILog/XILog.h>
-
 #include <servers/bootstrap.h>
 #include <mach/mach_port.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
-
 #include <pthread.h>
+#include "PMTestLib.h"
 
-#define kMaxTestIterations 20
+#define kMaxTestIterations 25
 
-#define kMaxTestThreads 5
+#define kMaxTestThreads 3
 
 #define kSleepTime  1
-
-static XILogRef gLogRef = NULL;
 
 void threadLoopConnection(void *context)
 {
@@ -58,29 +54,25 @@ void threadLoopConnection(void *context)
     kern_return_t           kern_result = KERN_SUCCESS;
     mach_port_t             new_pm_connection = MACH_PORT_NULL;
     static  int             use_profile = 1;
-    
     CFDictionaryRef         the_profiles = NULL;
     CFMutableDictionaryRef  changeable_profiles = NULL;
     CFNumberRef             putThisNumberIn = NULL;
-
     int                     thread_num = (int)context;
-
     int                     testiterations = 0;
 
     do {
+    
+    
+    
         /*
          * Open a mach port connection to pm configd
          */
-        XILogBeginTestCase(gLogRef, "Open PM configd connection", "Attempts to establish a mig connection to PM configd");
-        
-        XILogMsg("Thread %d running\n", thread_num);
-        
+        PMTestLog("Thread %d running\n", thread_num);
         kern_result = bootstrap_look_up(bootstrap_port, kIOPMServerBootstrapName, &new_pm_connection);    
-        
         if (KERN_SUCCESS != kern_result || MACH_PORT_NULL == new_pm_connection) {
-                XILogErr("Error establing PM configd connection: return %d, mach port = %d\n", kern_result, new_pm_connection);            
+                PMTestFail("Error establing PM configd connection: return %d, mach port = %d\n", kern_result, new_pm_connection);            
         }    
-        XILogEndTestCase(gLogRef, kXILogTestPassOnErrorLevel);
+        PMTestPass("Open PM configd connection");
 
         if (MACH_PORT_NULL == new_pm_connection) {
             continue;
@@ -89,48 +81,35 @@ void threadLoopConnection(void *context)
         /*
          * Set power profiles, as seen in Energy Saver.
          */
-        XILogBeginTestCase(gLogRef, "Set a Power Profile", "Make a mig call into PM configd; change the active power profile.");
-        
         the_profiles = IOPMCopyActivePowerProfiles();
         if (!the_profiles) {
-            XILogErr("NULL return from IOPMCopyActivePowerProfiles().\n");
+            PMTestFail("NULL return from IOPMCopyActivePowerProfiles().\n");
         }
-        
         changeable_profiles = CFDictionaryCreateMutableCopy(0, 0, the_profiles);
-        
         putThisNumberIn = CFNumberCreate(0, kCFNumberIntType, &use_profile);
-        
         if (1 == use_profile) {
             use_profile = 2;
         } else {
             use_profile = 1;
         }
-        
         CFDictionarySetValue(changeable_profiles, CFSTR(kIOPMACPowerKey), putThisNumberIn);
-        
         ret = IOPMSetActivePowerProfiles(changeable_profiles);
         if(kIOReturnSuccess != ret) {
-            XILogErr("IOPMSetActivePowerProfiles returned 0x%08x; dictionary = %p; number = %p",
+            PMTestFail("IOPMSetActivePowerProfiles returned 0x%08x; dictionary = %p; number = %p",
                         ret, changeable_profiles, putThisNumberIn);
         }
+        PMTestPass("Set a Power Profile");
 
-        XILogEndTestCase(gLogRef, kXILogTestPassOnErrorLevel);
 
         /*
          * Close the open mach port connection
-         */
-        XILogBeginTestCase(gLogRef, "Close PM configd connection", "Close the PM mach port connection; expecting the process not to crash.");
-        
+         */        
         if (MACH_PORT_NULL == new_pm_connection) {
-            XILogErr("Error - cannot close NULL mach port.\n");
+            PMTestFail("Error - cannot close NULL mach port.\n");
         } else {
             mach_port_destroy(mach_task_self(), new_pm_connection);
         }
-        XILogMsg("Completed %d of %d iterations.", testiterations, kMaxTestIterations);
-
-        XILogEndTestCase(gLogRef, kXILogTestPassOnErrorLevel);
-
-
+        PMTestPass("Completed %d of %d iterations.", testiterations, kMaxTestIterations);
     } while (testiterations++ < kMaxTestIterations);
 
     return;
@@ -138,33 +117,22 @@ void threadLoopConnection(void *context)
 
 int main(int argc, char *argv[])
 {
-    /* XILog */
-    char *XIconfig      = NULL;
-    int XIecho          = true; 
-    int XIxml           = false;
-    char *XILogPath     = NULL; 
-
     pthread_t           myThreads[kMaxTestThreads];
     int                 pthread_result;
     int                 i;
+    IOReturn            ret = 0;
 
-    /* Custom log file may be defined on command line */
-    if (argc > 2) {
-        XILogPath = argv[1];
+    ret = PMTestInitialize("PM configd server connection", "com.apple.iokit.ethan");     
+    if (kIOReturnSuccess != ret)
+    {
+        printf("PMTestInitialize fails. IOReturn error code = 0x%08x\n", ret);
+        exit(1);
     }
-     gLogRef = XILogOpenLog(XILogPath, "PM configd server connection", "com.apple.iokit.ethan", XIconfig, XIxml, XIecho);
-     if(gLogRef == NULL)
-     {
-         fprintf(stderr,"Couldn't create log: %s", XILogPath ? XILogPath : "(NULL)");
-         exit(-1);
-     }
-     
-    
     for (i=0; i<kMaxTestThreads; i++) 
     {
         pthread_result = pthread_create(&myThreads[i], NULL, (void *)threadLoopConnection, (void *)i);
         if (0 != pthread_result) {
-            printf("Error %d returne from pthread_create(\"%d\")\n", pthread_result, i);
+            printf("Error %d return from pthread_create(\"%d\")\n", pthread_result, i);
         }
     }
 
