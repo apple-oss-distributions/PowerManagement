@@ -54,6 +54,7 @@
 #include <IOKit/IOHibernatePrivate.h>
 
 #include <servers/bootstrap.h>
+#include <bootstrap_priv.h>
 #include <mach/mach_port.h>
 #include <string.h>
 #include <ctype.h>
@@ -109,15 +110,16 @@
 #define ARG_TTYKEEPAWAKE    "ttyskeepawake"
 #define ARG_GPU             "gpuswitch"
 #define ARG_NETAVAILABLE    "networkoversleep"
-#define ARG_PANICRESTART    "panicrestart"
 #define ARG_DEEPSLEEP       "standby"
 #define ARG_DEEPSLEEPDELAY  "standbydelay"
+#define ARG_DARKWAKES       "darkwakes"
 
 // Scheduling options
 #define ARG_SCHEDULE        "schedule"
 #define ARG_SCHED           "sched"
 #define ARG_REPEAT          "repeat"
 #define ARG_CANCEL          "cancel"
+#define ARG_RELATIVE        "relative"
 //#define ARG_SLEEP         "sleep"
 #define ARG_SHUTDOWN        "shutdown"
 #define ARG_RESTART         "restart"
@@ -160,9 +162,11 @@
 #define ARG_BOOKMARK        "bookmark"
 #define ARG_CLEAR_HISTORY   "clearpmhistory"
 #define ARG_SEARCH          "searchforuuid"
-#define ARG_USERCLIENTS		"userclients"
+#define ARG_USERCLIENTS     "userclients"
 #define ARG_UUID            "uuid"
 #define ARG_UUID_LOG        "uuidlog"
+#define ARG_EVERYTHING      "everything"
+#define ARG_PRINT_GETTERS   "getters"
 
 // special
 #define ARG_BOOT            "boot"
@@ -173,6 +177,9 @@
 #define ARG_SLEEPNOW        "sleepnow"
 #define ARG_RESETDISPLAYAMBIENTPARAMS       "resetdisplayambientparams"
 #define ARG_RDAP            "rdap"
+#define ARG_DEBUGFLAGS      "debugflags"
+#define ARG_BTINTERVAL      "btinterval"
+#define ARG_MT2BOOK         "mt2book"
 
 // special system
 #define ARG_DISABLESLEEP    "disablesleep"
@@ -213,26 +220,37 @@ static const size_t kMaxArgStringLength = 49;
 
 #define kUSecPerSec 1000000.0
 
-#define kNUM_PM_FEATURES    15
+typedef struct {
+    const char *name;
+    const char *displayAs;
+} PMFeature;
+
 /* list of all features */
-char    *all_features[kNUM_PM_FEATURES] =
+PMFeature all_features[] =
 { 
-    kIOPMDisplaySleepKey, 
-    kIOPMDiskSleepKey, 
-    kIOPMSystemSleepKey, 
-    kIOPMWakeOnLANKey, 
-    kIOPMWakeOnRingKey, 
-    kIOPMWakeOnACChangeKey,
-    kIOPMRestartOnPowerLossKey,
-    kIOPMSleepOnPowerButtonKey,
-    kIOPMWakeOnClamshellKey,
-    kIOPMReduceBrightnessKey,
-    kIOPMDisplaySleepUsesDimKey,
-    kIOPMMobileMotionModuleKey,
-    kIOPMGPUSwitchKey,
-    kIOPMDeepSleepEnabledKey,
-    kIOPMDeepSleepDelayKey
+    { kIOPMDisplaySleepKey,         ARG_DISPLAYSLEEP },
+    { kIOPMDiskSleepKey,            ARG_DISKSLEEP },
+    { kIOPMSystemSleepKey,          ARG_SLEEP },
+    { kIOPMWakeOnLANKey,            ARG_WOMP },
+    { kIOPMWakeOnRingKey,           ARG_RING },
+    { kIOPMWakeOnACChangeKey,       ARG_WAKEONACCHANGE },
+    { kIOPMRestartOnPowerLossKey,   ARG_AUTORESTART },
+    { kIOPMSleepOnPowerButtonKey,   ARG_POWERBUTTON },
+    { kIOPMWakeOnClamshellKey,      ARG_LIDWAKE },
+    { kIOPMReduceBrightnessKey,     ARG_REDUCEBRIGHT },
+    { kIOPMDisplaySleepUsesDimKey,  ARG_SLEEPUSESDIM },
+    { kIOPMMobileMotionModuleKey,   ARG_MOTIONSENSOR },
+    { kIOPMGPUSwitchKey,            ARG_GPU },
+    { kIOPMDeepSleepEnabledKey,     ARG_DEEPSLEEP },
+    { kIOPMDeepSleepDelayKey,       ARG_DEEPSLEEPDELAY },
+    { kIOPMDarkWakeBackgroundTaskKey, ARG_DARKWAKES },
+    { kIOPMTTYSPreventSleepKey,     ARG_TTYKEEPAWAKE },
+    { kIOHibernateModeKey,          ARG_HIBERNATEMODE },
+    { kIOHibernateFileKey,          ARG_HIBERNATEFILE }
+     
 };
+
+#define kNUM_PM_FEATURES    (sizeof(all_features)/sizeof(PMFeature))
 
 enum ArgumentType {
     kApplyToBattery = 1,
@@ -277,6 +295,15 @@ typedef struct {
 } ScheduledEventReturnType;
 
 
+#define RING_SIZE 100
+typedef struct {
+   aslmsg msgRing[RING_SIZE];
+   uint32_t readIdx;
+   uint32_t writeIdx;
+} MsgCache;
+
+MsgCache *msgCache = NULL;
+
 // function declarations
 static void usage(void);
 static IOReturn setRootDomainProperty(CFStringRef key, CFTypeRef val);
@@ -307,14 +334,21 @@ static void log_systemload(void);
 static void show_log(void);
 static void show_uuid(bool keep_running);
 static void listen_for_everything(void);
+static bool is_display_dim_captured(void);
 static void show_power_adapter(void);
+static void show_getters(void);
+static void show_everything(void);
 
 static void show_power_event_history(void);
 static void show_power_event_history_detailed(void);
 static void set_new_power_bookmark(void);
+static void set_debugFlags(char **argv);
+static void set_btInterval(char **argv);
 static void show_details_for_UUID(char *UUID_string);
 static void show_NULL_HID_events(void);
 static void show_root_domain_user_clients(void);
+static void show_activity(bool repeat);
+static void mt2bookmark(void);
 
 static void print_pretty_date(CFAbsoluteTime t, bool newline);
 static void sleepWakeCallback(
@@ -326,6 +360,7 @@ static void sleepWakeCallback(
 static void install_listen_for_notify_system_power(void);
 static void install_listen_PM_connection(void);
 static void install_listen_IORegisterForSystemPower(void);
+static void install_listen_com_apple_powermanagement_sleepservices_notify(void);
 
 static void log_ps_change_handler(void *);
 static int log_power_source_changes(uintptr_t which);
@@ -381,7 +416,8 @@ static int parseScheduledEvent(
         char                        **argv,
         int                         *num_args_parsed,
         ScheduledEventReturnType    *local_scheduled_event, 
-        bool                        *cancel_scheduled_event);
+        bool                        *cancel_scheduled_event,
+        bool                        is_relative_event);
 static int parseRepeatingEvent(
         char                        **argv,
         int                         *num_args_parsed,
@@ -401,6 +437,67 @@ static int parseArgs(
         CFDictionaryRef             *repeating_event,
         bool                        *cancel_repeating_event,
         uint32_t                    *pmCmd);
+
+static const char *getCanonicalArgForSynonym(char *pass)
+{
+    if (!pass || 0 == strlen(pass)) 
+        return ARG_LIVE;
+    if (!strncmp(ARG_DISK, pass, kMaxArgStringLength))
+        return ARG_CUSTOM;
+    if (!strncmp(ARG_ADAPTER_AC, pass, kMaxArgStringLength))
+        return ARG_ADAPTER;
+    if (!strncmp(ARG_BATT, pass, kMaxArgStringLength))
+        return ARG_PS;
+    return pass;
+}
+
+typedef enum {
+    kActionGetOnceNoArgs,
+    kActionGetLog,
+    kActionRecursiveBeCareful
+} CommandActionType;
+
+typedef struct {
+    CommandActionType       actionType;
+	const char              *arg;
+	void                    (^action)(void);
+} CommandAndAction;
+
+static CommandAndAction the_getters[] =
+	{ 
+		{kActionGetOnceNoArgs,  ARG_LIVE,           ^{ show_system_power_settings(); show_active_profiles(); show_live_pm_settings();}},	
+		{kActionGetOnceNoArgs,  ARG_CUSTOM,         ^{ show_custom_pm_settings(); }},
+        {kActionGetOnceNoArgs,  ARG_CAP,            ^{ show_supported_pm_features(); }},
+        {kActionGetOnceNoArgs,  ARG_SCHED,          ^{ show_scheduled_events(); }},
+        {kActionGetOnceNoArgs,  ARG_UPS,            ^{ show_ups_settings(); }},
+        {kActionGetOnceNoArgs,  ARG_SYS_PROFILES,   ^{ show_active_profiles(); show_system_profiles(); }},
+    	{kActionGetOnceNoArgs,  ARG_ADAPTER,        ^{ show_power_adapter(); }},
+    	{kActionGetOnceNoArgs,  ARG_PS,             ^{ show_power_sources(kApplyToBattery | kApplyToUPS); }},
+    	{kActionGetLog,         ARG_PSLOG,          ^{ log_power_source_changes(kApplyToBattery | kApplyToUPS); }},
+    	{kActionGetLog,         ARG_TRCOLUMNS,      ^{ log_power_source_changes(kShowColumns); }},
+    	{kActionGetLog,         ARG_PSRAW,          ^{ log_raw_power_source_changes(); }},
+    	{kActionGetLog,         ARG_THERMLOG,       ^{ log_thermal_events(); }},
+    	{kActionGetOnceNoArgs,  ARG_ASSERTIONS,     ^{ show_assertions(); }},
+    	{kActionGetLog,         ARG_ASSERTIONSLOG,  ^{ log_assertions(); }},
+    	{kActionGetOnceNoArgs,  ARG_SYSLOAD,        ^{ show_systemload(); }},
+    	{kActionGetLog,         ARG_SYSLOADLOG,     ^{ log_systemload(); }},
+    	{kActionGetOnceNoArgs,  ARG_LOG,            ^{ show_log(); }},
+    	{kActionGetLog,         ARG_LISTEN,         ^{ listen_for_everything(); }},
+    	{kActionGetOnceNoArgs,  ARG_HISTORY,        ^{ show_power_event_history(); }},
+    	{kActionGetOnceNoArgs,  ARG_HISTORY_DETAILED, ^{ show_power_event_history_detailed(); }},
+    	{kActionGetOnceNoArgs,  ARG_HID_NULL,       ^{ show_NULL_HID_events(); }},
+    	{kActionGetOnceNoArgs,  ARG_USERCLIENTS,    ^{ show_root_domain_user_clients(); }},
+        {kActionGetOnceNoArgs,  ARG_UUID,           ^{ show_uuid(kActionGetOnceNoArgs); }},
+    	{kActionGetLog,         ARG_UUID_LOG,       ^{ show_uuid(kActionGetLog); }},
+    	{kActionGetLog,         ARG_ACTIVITYLOG,    ^{ show_activity(kActionGetLog); }},
+    	{kActionGetOnceNoArgs,  ARG_ACTIVITY,       ^{ show_activity(kActionGetOnceNoArgs); }},
+        {kActionGetOnceNoArgs,  ARG_PRINT_GETTERS,  ^{ show_getters(); }},
+        {kActionRecursiveBeCareful, ARG_EVERYTHING, ^{ show_everything(); }}
+	};
+
+
+static const int the_getters_count = (sizeof(the_getters) / sizeof(CommandAndAction));
+
 
 //****************************
 //****************************
@@ -508,37 +605,62 @@ int main(int argc, char *argv[]) {
         int32_t                 return_code;
         kern_return_t           kern_result;
         
-        settings_data = IOCFSerialize(es_custom_settings, 0);
-
-        if(!settings_data) return 1;
-
+        /* 
+         * Step 1 - send these forced settings over to powerd.
+         * 
+         */
         err = _pm_connect(&pm_server);
-        if(kIOReturnSuccess != err) {
-            return 7;
-        }
-    
-        // mig forced settings over to configd
-        kern_result = io_pm_force_active_settings(
-                pm_server, 
-                (vm_offset_t)CFDataGetBytePtr(settings_data),
-                CFDataGetLength(settings_data),
-                &return_code);
-    
-        if( KERN_SUCCESS != kern_result )
-        {
-            printf("exit kern_result = 0x%08x\n", kern_result);
-            return 7;        
-        }
-        if( kIOReturnSuccess != return_code )
-        {
-            printf("exit return_code = 0x%08x\n", return_code);
-            return 7;        
+        if (kIOReturnSuccess == err) {
+            settings_data = IOCFSerialize(es_custom_settings, 0);
+            
+            if (settings_data)
+            {
+                kern_result = io_pm_force_active_settings(
+                        pm_server, 
+                        (vm_offset_t)CFDataGetBytePtr(settings_data),
+                        CFDataGetLength(settings_data),
+                        &return_code);
+            
+                if( KERN_SUCCESS != kern_result ) {
+                    printf("exit kern_result = 0x%08x\n", kern_result);
+                }
+                if( kIOReturnSuccess != return_code ) {
+                    printf("exit return_code = 0x%08x\n", return_code);
+                }
+
+                CFRelease(settings_data);
+
+                if (KERN_SUCCESS != kern_result || kIOReturnSuccess != return_code) {
+                    exit(1);
+                }
+            }
+            _pm_disconnect(pm_server);
         }
 
-        _pm_disconnect(pm_server);
+        /* 
+         * Step 2 - this code might be running in a partilially uninitialized OS,
+         * and powerd might not be running. e.g. at Installer context.
+         * Since powerd may not be running, we also activate these settings directly 
+         * to the controlling drivers in the kernel.
+         *
+         */
+        CFTypeRef       powersources = IOPSCopyPowerSourcesInfo();
+        CFStringRef     activePowerSource = NULL;
+        CFDictionaryRef useSettings = NULL;
+        if (powersources) {
+            activePowerSource = IOPSGetProvidingPowerSourceType(powersources);
+            if (!activePowerSource) {
+                activePowerSource = CFSTR(kIOPMACPowerKey);
+            }
+            useSettings = CFDictionaryGetValue(es_custom_settings, activePowerSource);
+            if (useSettings) {
+                ActivatePMSettings(useSettings, true);
+            }
+            CFRelease(powersources);
+        }
 
-        // explicitly return here. If this is a 'force' call we do _not_ want
-        // to attempt to write any settings to the disk, or to try anything 
+        // Return here. If this is a 'force' call we do _not_ want
+        // to attempt to write any settings to the disk, or to try anything
         // else at all, as our environment may be unwritable / diskless
         // (booted from install CD)
         return 0;
@@ -751,6 +873,17 @@ int main(int argc, char *argv[]) {
 //****************************
 
 
+static CFTypeRef copyRootDomainProperty(CFStringRef key)
+{
+    static io_object_t      rd = IO_OBJECT_NULL;
+    
+    if (IO_OBJECT_NULL == rd) {
+        rd = copyRootDomainRef();
+    }
+    
+    return IORegistryEntryCreateCFProperty(rd, key, 0, 0);
+}
+
 static IOReturn setRootDomainProperty(CFStringRef key, CFTypeRef val) 
 {
     io_registry_entry_t         root_domain = copyRootDomainRef();
@@ -817,6 +950,7 @@ static void show_pm_settings_dict(
     CFTypeRef               ps_blob;
     CFStringRef             activeps = NULL;
     int                     show_override_type = 0;
+    bool                    show_display_dim = false;
     
     ps_blob = IOPSCopyPowerSourcesInfo();
     if(ps_blob) {
@@ -850,61 +984,41 @@ static void show_pm_settings_dict(
         for(j=0; j<indent;j++) printf(" ");
 
         divider = 0;
-
-        if (strcmp(ps, kIOPMDisplaySleepKey) == 0) {
-                printf(" displaysleep\t");  
-                if(show_overrides) 
-                    show_override_type = _kIOPMAssertionDisplayOn;
-        } else if (strcmp(ps, kIOPMDiskSleepKey) == 0)
-                printf(" disksleep\t");  
-        else if (strcmp(ps, kIOPMSystemSleepKey) == 0) {
-                printf(" sleep\t\t");
-                if(show_overrides) 
-                    show_override_type = _kIOPMAssertionSystemOn;
-        } else if (strcmp(ps, kIOPMWakeOnLANKey) == 0)
-                printf(" womp\t\t");  
-        else if (strcmp(ps, kIOPMWakeOnRingKey) == 0)
-                printf(" ring\t\t");  
-        else if (strcmp(ps, kIOPMRestartOnPowerLossKey) == 0)
-                printf(" autorestart\t");  
-        else if (strcmp(ps, kIOPMSleepOnPowerButtonKey) == 0)
-                printf(" powerbutton\t");
-        else if (strcmp(ps, kIOPMWakeOnClamshellKey) == 0)
-                printf(" lidwake\t");
-        else if (strcmp(ps, kIOPMWakeOnACChangeKey) == 0)
-                printf(" acwake\t\t");
-        else if (strcmp(ps, kIOPMReduceBrightnessKey) == 0)
-                printf(" %s\t", ARG_REDUCEBRIGHT);
-        else if (strcmp(ps, kIOPMDisplaySleepUsesDimKey) == 0)
-                printf(" %s\t", ARG_SLEEPUSESDIM);
-        else if (strcmp(ps, kIOPMMobileMotionModuleKey) == 0)
-                printf(" %s\t\t", ARG_MOTIONSENSOR);
-        else if (strcmp(ps, kIOPMTTYSPreventSleepKey) == 0)
-                printf(" %s\t", ARG_TTYKEEPAWAKE);
-        else if (strcmp(ps, kIOPMGPUSwitchKey) == 0)
-                printf(" %s\t", ARG_GPU);
-        else if (strcmp(ps, kIOPMPrioritizeNetworkReachabilityOverSleepKey) == 0)
-                printf(" %s\t", ARG_NETAVAILABLE);                    
-        else if (strcmp(ps, kIOPMRestartOnKernelPanicKey) == 0)
-                printf(" %s\t", ARG_PANICRESTART);
-        else if (strcmp(ps, kIOHibernateModeKey) == 0)
-                printf(" %s\t", ARG_HIBERNATEMODE);
-        else if (strcmp(ps, kIOHibernateFileKey) == 0)
-                printf(" %s\t", ARG_HIBERNATEFILE);
-        else if (strcmp(ps, kIOPMDeepSleepEnabledKey) == 0)
-                printf(" %s\t", ARG_DEEPSLEEP);
-        else if (strcmp(ps, kIOPMDeepSleepDelayKey) == 0)
-                printf(" %s\t", ARG_DEEPSLEEPDELAY);
-        else {
-                // unknown setting
-                printf("%s\t", ps);
-        }
-  
+        
+		if (strcmp(ps, kIOPMPrioritizeNetworkReachabilityOverSleepKey) == 0)
+		{
+            printf(" %-20s ", ARG_NETAVAILABLE);                    
+		} else if (strcmp(ps, kIOPMDisplaySleepKey) == 0) {
+	        printf(" %-20s ", "displaysleep");  
+	        if(show_overrides) {
+	            show_override_type = _kIOPMAssertionDisplayOn;
+		}
+	        show_display_dim = true;
+		} else if (strcmp(ps, kIOPMSystemSleepKey) == 0) {
+			printf(" %-20s ", "sleep");
+            if(show_overrides) {
+                show_override_type = _kIOPMAssertionSystemOn;
+			}
+  		} else {
+	        for(j=0; j<kNUM_PM_FEATURES; j++) {
+	            if (!strncmp(ps, all_features[j].name, kMaxArgStringLength)) {
+	                printf(" %-20s ", all_features[j].displayAs);
+                    break;
+	            }
+	        }
+            if (j==kNUM_PM_FEATURES)
+                printf(" %-20s ",ps);
+		}
+		  
         print_setting_value(vals[i], divider);  
 
         if(show_override_type) 
             print_override_pids(show_override_type);
-
+        if(show_display_dim) {
+            if( is_display_dim_captured() )
+                printf(" (Graphics dim captured)");
+            show_display_dim = false;
+        }
         printf("\n");
     }
 
@@ -949,6 +1063,8 @@ static void print_override_pids(int assertionType)
     CFDictionaryRef         assertions_state = NULL;
     CFNumberRef             assertion_value;
     IOReturn                ret;
+    char                    display_string[kMaxLongStringLength] = "\0";
+    int                     length = 0;
     
     /*
      * Early pre-screening - don't dive into the assertions data
@@ -978,6 +1094,8 @@ static void print_override_pids(int assertionType)
         {
             goto bail;
         }
+       snprintf(display_string, kMaxLongStringLength, " (display sleep prevented by ");
+       length = strlen(display_string);
     }
 
 
@@ -1006,6 +1124,8 @@ static void print_override_pids(int assertionType)
             goto bail;
         }
         
+       snprintf(display_string, kMaxLongStringLength, " (sleep prevented by ");
+       length = strlen(display_string);
     }
 
 
@@ -1016,9 +1136,7 @@ static void print_override_pids(int assertionType)
     CFNumberRef             *pids = NULL;
     CFArrayRef              *assertions = NULL;
     int                     process_count;
-    char                    display_string[kMaxLongStringLength] = "\0";
     char                    pid_buf[10] = "\0";
-    int                     length = 0;
     int                     this_is_the_first = 1;
     int                     i;
 
@@ -1028,8 +1146,6 @@ static void print_override_pids(int assertionType)
         goto bail;    
     }
     
-    snprintf(display_string, kMaxLongStringLength, " (imposed by ");
-    length = strlen(display_string);
 
     process_count = CFDictionaryGetCount(assertions_pids);
     pids = malloc(sizeof(CFNumberRef)*process_count);
@@ -1148,12 +1264,12 @@ bail:
 
 static void show_supported_pm_features(void) 
 {
-    int i;
-    CFStringRef feature;
-    CFTypeRef               ps_info = IOPSCopyPowerSourcesInfo();    
-    CFStringRef source;
-    char            ps_buf[40];
-
+    CFStringRef 		feature;
+    CFTypeRef           ps_info = IOPSCopyPowerSourcesInfo();    
+    CFStringRef 		source;
+    char         	    ps_buf[40];
+    int 				i;
+    
     if(!ps_info) {
         source = CFSTR(kIOPMACPowerKey);
     } else {
@@ -1163,63 +1279,25 @@ static void show_supported_pm_features(void)
        !CFStringGetCString(source, ps_buf, 40, kCFStringEncodingMacRoman)) {
         printf("internal supported features string error!\n");
     }
-
+    
     printf("Capabilities for %s:\n", ps_buf);
     // iterate the list of all features
     for(i=0; i<kNUM_PM_FEATURES; i++)
     {
-        feature = CFStringCreateWithCStringNoCopy(NULL, all_features[i], 
-                                kCFStringEncodingMacRoman, kCFAllocatorNull);
-        if (!feature)
-            continue;
-        if( IOPMFeatureIsAvailable(feature, source) )
-        {
-          if (strcmp(all_features[i], kIOPMSystemSleepKey) == 0)
-            printf(" sleep\n");  
-          else if (strcmp(all_features[i], kIOPMRestartOnPowerLossKey) == 0)
-            printf(" autorestart\n");  
-          else if (strcmp(all_features[i], kIOPMDiskSleepKey) == 0)
-            printf(" disksleep\n");  
-          else if (strcmp(all_features[i], kIOPMWakeOnLANKey) == 0)
-            printf(" womp\n");  
-          else if (strcmp(all_features[i], kIOPMWakeOnRingKey) == 0)
-            printf(" ring\n");  
-          else if (strcmp(all_features[i], kIOPMDisplaySleepKey) == 0)
-            printf(" displaysleep\n");  
-          else if (strcmp(all_features[i], kIOPMSleepOnPowerButtonKey) == 0)
-            printf(" powerbutton\n");
-          else if (strcmp(all_features[i], kIOPMWakeOnClamshellKey) == 0)
-            printf(" lidwake\n");
-          else if (strcmp(all_features[i], kIOPMWakeOnACChangeKey) == 0)
-            printf(" acwake\n");
-          else if (strcmp(all_features[i], kIOPMReduceBrightnessKey) == 0)
-            printf(" %s\n", ARG_REDUCEBRIGHT);
-          else if (strcmp(all_features[i], kIOPMDisplaySleepUsesDimKey) == 0)
-            printf(" %s\n", ARG_SLEEPUSESDIM);
-          else if (strcmp(all_features[i], kIOPMMobileMotionModuleKey) == 0)
-            printf(" %s\n", ARG_MOTIONSENSOR);
-          else if (strcmp(all_features[i], kIOPMTTYSPreventSleepKey) == 0)
-            printf(" %s\n", ARG_TTYKEEPAWAKE);
-          else if (strcmp(all_features[i], kIOPMGPUSwitchKey) == 0)
-            printf(" %s\n", ARG_GPU);
-          else if (strcmp(all_features[i], kIOPMPrioritizeNetworkReachabilityOverSleepKey) == 0)
-              printf(" %s\n", ARG_NETAVAILABLE);
-          else if (strcmp(all_features[i], kIOPMRestartOnKernelPanicKey) == 0)
-              printf(" %s\n", ARG_PANICRESTART);
-          else if (strcmp(all_features[i], kIOHibernateModeKey) == 0)
-            printf(" %s\n", ARG_HIBERNATEMODE);
-          else if (strcmp(all_features[i], kIOHibernateFileKey) == 0)
-            printf(" %s\n", ARG_HIBERNATEFILE);
-          else if (strcmp(all_features[i], kIOPMDeepSleepEnabledKey) == 0)
-              printf(" %s\n", ARG_DEEPSLEEP);
-          else if (strcmp(all_features[i], kIOPMDeepSleepDelayKey) == 0)
-              printf(" %s\n", ARG_DEEPSLEEPDELAY);
-            else
-            printf("%s\n", all_features[i]);
-        }
-        CFRelease(feature);
+        feature = CFStringCreateWithCStringNoCopy(NULL, all_features[i].name, 
+                                                  kCFStringEncodingMacRoman, kCFAllocatorNull);
+        if (feature)
+ 		{
+	        if (IOPMFeatureIsAvailable(feature, source)) 
+			{
+                printf(" %s\n", all_features[i].displayAs);  
+	        }
+	        CFRelease(feature);
+		}
     }
-    if(ps_info) CFRelease(ps_info);
+    if(ps_info) {
+		CFRelease(ps_info);
+	}
 }
 
 static void show_power_profile(
@@ -1783,6 +1861,45 @@ static bool prevent_idle_sleep(void)
     
     return true;
 }
+enum {
+    kPrintLotsOfThings  = 0,
+    kJustPrintSleep     = 1,
+    kJustPrintWake      = 2
+};
+
+static void printSleepAndWakeReasons(int just_do_it)
+{
+    CFStringRef lastSleepReason     = copyRootDomainProperty(CFSTR("Last Sleep Reason"));
+    CFStringRef wakeReason          = copyRootDomainProperty(CFSTR("Wake Reason"));
+    CFStringRef wakeType            = copyRootDomainProperty(CFSTR("Wake Type"));
+    char buf[100];
+    
+    if (just_do_it != kJustPrintWake)
+    {
+        if (lastSleepReason) {
+            CFStringGetCString(lastSleepReason, buf, sizeof(buf), kCFStringEncodingUTF8);
+            printf("  Last Sleep Reason = %s\n", buf);
+        }
+    }
+    
+    if (just_do_it != kJustPrintSleep)
+    {
+        if (wakeReason) {
+            CFStringGetCString(wakeReason, buf, sizeof(buf), kCFStringEncodingUTF8);
+            printf("  Wake Reason = %s\n", buf);
+        }
+        if (wakeType) {
+            CFStringGetCString(wakeType, buf, sizeof(buf), kCFStringEncodingUTF8);
+            printf("  wakeType = %s\n", buf);
+        }
+    }
+    
+    if (lastSleepReason)        { CFRelease(lastSleepReason); }
+    if (wakeReason)             { CFRelease(wakeReason); }
+    if (wakeType)               { CFRelease(wakeType); }
+
+    return;
+}
 
 
 /* sleepWakeCallback
@@ -1802,8 +1919,10 @@ sleepWakeCallback(
     case kIOMessageSystemWillSleep:
         if ( behavior & kLogSleepEvents )
         {
+            printf("\n");
             print_pretty_date(CFAbsoluteTimeGetCurrent(), false); 
-            printf("Sleeping...\n");
+            printf("IORegisterForSystemPower: ...Sleeping...\n");
+//            printSleepAndWakeReasons(kJustPrintSleep);
             fflush(stdout);
         }
 
@@ -1814,8 +1933,10 @@ sleepWakeCallback(
         if( behavior & kCancelSleepEvents ) 
         {
             IOCancelPowerChange(gPMAckPort, (long)messageArgument);
+            printf("\n");
             print_pretty_date(CFAbsoluteTimeGetCurrent(), false); 
-            printf("Cancelling idle sleep attempt...\n");
+            printf("IORegisterForSystemPower: ...Cancelling...\n");
+//            printSleepAndWakeReasons(kJustPrintSleep);
         } else {
             IOAllowPowerChange(gPMAckPort, (long)messageArgument);
         }
@@ -1824,8 +1945,10 @@ sleepWakeCallback(
     case kIOMessageSystemHasPoweredOn:
         if ( behavior & kLogSleepEvents )
         {
+            printf("\n");
             print_pretty_date(CFAbsoluteTimeGetCurrent(), false);   // false == no newline        
-            printf("Waking...\n");
+            printf("IORegisterForSystemPower: ...HasPoweredOn...\n");
+            printSleepAndWakeReasons(kJustPrintWake);
             fflush(stdout);
         }
         break;
@@ -2125,7 +2248,7 @@ static void print_pretty_date(CFAbsoluteTime t, bool newline)
     if(time_date)
     {
         CFStringGetCString(time_date, _date, 60, kCFStringEncodingMacRoman);
-        printf("%-23.23s ", _date); fflush(stdout);
+        printf("%-24.24s ", _date); fflush(stdout);
         if(newline) printf("\n");
         CFRelease(time_date); 
     }
@@ -2206,7 +2329,7 @@ static bool get_powerMgmtProps(io_registry_entry_t service, PowerMgmtProperties 
     CFDictionaryRef pwrMgmtDict = NULL;
     bool change = false;
 
-    IORegistryEntryCreateCFProperties(service, &serviceProperties, 0, 0);
+    kr = IORegistryEntryCreateCFProperties(service, &serviceProperties, 0, 0);
     if ( kr != KERN_SUCCESS || serviceProperties == NULL ) {
         printf("Failed to get service properties\n");
         goto exit;
@@ -2338,10 +2461,25 @@ static void show_assertions(void)
     printf("Assertion status system-wide:\n");
     for (i=0; i<count; i++)
     {
+        if ((kCFCompareEqualTo == CFStringCompare(assertionNames[i], kIOPMAssertionTypeNeedsCPU, 0)) ||
+            (kCFCompareEqualTo == CFStringCompare(assertionNames[i], kIOPMAssertionTypeDisableInflow, 0)) ||
+            (kCFCompareEqualTo == CFStringCompare(assertionNames[i], kIOPMAssertionTypeInhibitCharging, 0)) ||
+            (kCFCompareEqualTo == CFStringCompare(assertionNames[i], kIOPMAssertionTypeDisableLowBatteryWarnings, 0)) ||
+            (kCFCompareEqualTo == CFStringCompare(assertionNames[i], kIOPMAssertionTypeDisableRealPowerSources_Debug, 0)))
+        {
+           /* These are rarely used. So, print only if they are set */
+           if (val == 0)
+              continue;
+        }
+
+#if !TARGET_OS_EMBEDDED
+        if (kCFCompareEqualTo == CFStringCompare(assertionNames[i], kIOPMAssertionTypeEnableIdleSleep, 0))
+           continue;
+#endif
+    
         CFStringGetCString(assertionNames[i], name, 50, kCFStringEncodingMacRoman);
         CFNumberGetValue(assertionValues[i], kCFNumberIntType, &val);    
-    
-        printf("   %-30s %10d\n", name, val);
+        printf("   %-30s %d\n", name, val);
     }
 
 
@@ -2397,7 +2535,12 @@ static void show_assertions(void)
                 CFNumberRef             uniqueID = NULL;
                 CFBooleanRef            power_limits = NULL;
                 uint64_t                uniqueID_int = 0;
-                
+                CFDateRef               createdDate = NULL;
+                CFAbsoluteTime          createdCFTime = 0.0;
+                char                    ageString[40];
+                CFStringRef             pidName = NULL;
+                char                    pid_name_buf[100];
+
                 char                    all_assertions_buf[400];
                 char                    val_buf[300];
                 bool                    timed_out = false;
@@ -2406,6 +2549,8 @@ static void show_assertions(void)
                 if(!tmp_dict) {
                     goto exit;
                 }
+                
+                bzero(all_assertions_buf, sizeof(all_assertions_buf));
                 
                 val_string = CFDictionaryGetValue(tmp_dict, kIOPMAssertionTypeKey);
                 if (val_string) {
@@ -2426,10 +2571,28 @@ static void show_assertions(void)
                     CFNumberGetValue(uniqueID, kCFNumberSInt64Type, &uniqueID_int);
                 }
                 
-                printf("  pid %d: [0x%016lx] %s named: \"%s\" %s\n", 
-                                the_pid, (long unsigned int)uniqueID_int, all_assertions_buf,
-                                val_string ? val_buf : "(error - no name)",
-                                timed_out ? "(timed out)" : "");                
+                if ((createdDate = CFDictionaryGetValue(tmp_dict, kIOPMAssertionCreateDateKey))) 
+                {
+                    createdCFTime                   = CFDateGetAbsoluteTime(createdDate);
+                    int createdSince                = (int)(CFAbsoluteTimeGetCurrent() - createdCFTime);
+                    int hours                       = createdSince / 3600;
+                    int minutes                     = (createdSince / 60) % 60;
+                    int seconds                     = createdSince % 60;
+                    snprintf(ageString, sizeof(ageString), "%02d:%02d:%02d ", hours, minutes, seconds);
+                }
+                
+                if ((pidName = CFDictionaryGetValue(tmp_dict, kIOPMAssertionProcessNameKey)))
+                {
+                    CFStringGetCString(pidName, pid_name_buf, sizeof(pid_name_buf), kCFStringEncodingUTF8);
+                }
+                
+                printf("  pid %d(%s): [0x%016llx] %s%s named: \"%s\" %s\n",
+                       the_pid, pidName?pid_name_buf:"?",
+                        uniqueID_int,
+                        createdDate ? ageString:"",
+                        all_assertions_buf,
+                        val_string ? val_buf : "(error - no name)",
+                        timed_out ? "(timed out)" : "");                
 
                 val_string = CFDictionaryGetValue(tmp_dict, kIOPMAssertionDetailsKey);
                 if (val_string) {
@@ -2446,16 +2609,16 @@ static void show_assertions(void)
                         bundle = CFBundleCreate(0, _url);
                         CFRelease(_url);
                     }
-                    if (!bundle)
-                        printf("error bundle not found\n");
-                    
-                    localized_string = CFBundleCopyLocalizedString(bundle, raw_localizable_string, NULL, NULL);
-                    
-                    if (localized_string) {
-                        if (CFStringGetCString(localized_string, val_buf, sizeof(val_buf), kCFStringEncodingUTF8)) {
-                            printf("\tLocalized=%s\n", val_buf);
-                        }
-                        CFRelease(localized_string);
+                    if (bundle) {
+                       
+                       localized_string = CFBundleCopyLocalizedString(bundle, raw_localizable_string, NULL, NULL);
+                       
+                       if (localized_string) {
+                           if (CFStringGetCString(localized_string, val_buf, sizeof(val_buf), kCFStringEncodingUTF8)) {
+                               printf("\tLocalized=%s\n", val_buf);
+                           }
+                           CFRelease(localized_string);
+                       }
                     }
                 } // Localize & display human readable string
 
@@ -2465,6 +2628,34 @@ static void show_assertions(void)
                        printf("\tAssertion applied on Battery power also\n");
                     else
                        printf("\tAssertion applied on AC  power only\n");
+                }
+                
+                CFNumberRef         timeoutNum      = NULL;
+                CFAbsoluteTime      timeoutCFTime   = 0.0;
+                CFAbsoluteTime      absCFTime   = 0.0;
+                CFTimeInterval      secondsUntilFire = 0.0;
+                CFStringRef         actionStr       = NULL;
+                char                actionBuf[55];
+                
+                if ( (timeoutNum = CFDictionaryGetValue(tmp_dict, kIOPMAssertionTimeoutKey)))
+                {
+                    CFNumberGetValue(timeoutNum, kCFNumberDoubleType, &timeoutCFTime);
+                    
+                    if (timeoutCFTime != 0) {
+                        absCFTime = CFAbsoluteTimeGetCurrent();  
+                        
+                        secondsUntilFire = (timeoutCFTime + createdCFTime) - CFAbsoluteTimeGetCurrent();
+                        
+                        actionStr = CFDictionaryGetValue(tmp_dict, kIOPMAssertionTimeoutActionKey);
+                        if (actionStr) {
+                            CFStringGetCString(actionStr, actionBuf, sizeof(actionBuf), kCFStringEncodingUTF8);
+                        }
+                        
+                        printf("\tTimeout %s %.01f Action=%s\n", 
+                               createdDate ? "will fire in:" : "set for interval:",
+                               secondsUntilFire,
+                               actionStr ? actionBuf : "<unknown action>");
+                    }
                 }
             }
         }
@@ -2600,7 +2791,7 @@ static void log_assertions(void)
     int                 notify_status;
 
     notify_status = notify_register_dispatch(
-            kIOPMAssertionsChangedNotifyString, 
+            kIOPMAssertionsAnyChangedNotifyString, 
             &token, 
             dispatch_get_main_queue(), 
             ^(int t) {
@@ -2682,8 +2873,7 @@ static void show_systemload(void)
 static void log_systemload(void)
 {
     int                 token = 0;
-    int                 notify_status = 0;
-    uint32_t            result;
+    uint32_t            notify_status = 0;
     
     show_systemload();
 
@@ -2695,9 +2885,9 @@ static void log_systemload(void)
                show_systemload();
              });
 
-    if (NOTIFY_STATUS_OK != result)
+    if (NOTIFY_STATUS_OK != notify_status)
     {
-        printf("LogSystemLoad: notify_register_dispatch returns error %d; Exiting.\n", result);
+        printf("LogSystemLoad: notify_register_dispatch returns error %d; Exiting.\n", notify_status);
         return;
     }
 
@@ -2910,12 +3100,22 @@ static void log_raw_battery_interest(
 
 static void _snprintSystemPowerStateDescription(char *sysBuf, int sysBufLen, uint64_t caps)
 {
-    snprintf(sysBuf, sysBufLen, "Capabilities: %s%s%s%s%s",
-        (caps & kIOPMSystemPowerStateCapabilityCPU) ? "cpu ":"<none>",
+    char *on_sleep_dark = "";
+    if (0 == caps) {
+        on_sleep_dark = "*To Sleep*";
+    } else if (caps & kIOPMSystemPowerStateCapabilityDisk && !(caps &kIOPMSystemPowerStateCapabilityVideo)) {
+        on_sleep_dark = "*To Dark*";
+    } else if (caps & kIOPMSystemPowerStateCapabilityCPU) {
+        on_sleep_dark = "*Waking*";
+    }
+    
+    snprintf(sysBuf, sysBufLen, "Capabilities: %s%s%s%s%s%s",
+        (caps & kIOPMSystemPowerStateCapabilityCPU) ? "cpu ":"<none> ",
         (caps & kIOPMSystemPowerStateCapabilityDisk) ? "disk ":"",
         (caps & kIOPMSystemPowerStateCapabilityNetwork) ? "net ":"",
         (caps & kIOPMSystemPowerStateCapabilityAudio) ? "aud ":"",
-        (caps & kIOPMSystemPowerStateCapabilityVideo) ? "vid ":"");
+        (caps & kIOPMSystemPowerStateCapabilityVideo) ? "vid ":"",
+        on_sleep_dark);
 }
 
 static int log_raw_power_source_changes(void)
@@ -3033,10 +3233,23 @@ void myPMConnectionHandler(
     char                        stateDescriptionStr[100];
     IOReturn                    ret;
 
+    printf("\n");
     print_pretty_date(CFAbsoluteTimeGetCurrent(), true);
-    _snprintSystemPowerStateDescription(stateDescriptionStr, 
-                                sizeof(stateDescriptionStr), (uint64_t)capabilities);
-    printf("- PMConnection: %s\n", stateDescriptionStr);
+    _snprintSystemPowerStateDescription(stateDescriptionStr, sizeof(stateDescriptionStr), (uint64_t)capabilities);
+    printf("PMConnection: %s\n", stateDescriptionStr);
+
+    IOPMSystemPowerStateCapabilities    fromAPI = IOPMConnectionGetSystemCapabilities();
+    if (capabilities != fromAPI)
+    {
+        printf("PMConnection: API IOPMConnectionGetSystemCapabilities() returns 0x%04x, should have returned 0x%04x\n", (uint32_t)fromAPI, (uint32_t)capabilities);
+    }
+    
+    if (!(kIOPMSystemPowerStateCapabilityCPU & capabilities))
+    {
+        printSleepAndWakeReasons(kJustPrintSleep);
+    } else {
+        printSleepAndWakeReasons(kJustPrintWake);
+    }
     
     ret = IOPMConnectionAcknowledgeEvent(connection, token);    
     if (kIOReturnSuccess != ret)
@@ -3089,6 +3302,33 @@ static void install_listen_PM_connection(void)
 #endif /* TARGET_OS_EMBEDDED */
 }
 
+static void install_listen_com_apple_powermanagement_sleepservices_notify(void)
+{
+    int     token;
+    int     status;
+    
+    status = notify_register_dispatch(kIOPMSleepServiceActiveNotifyName, &token, dispatch_get_main_queue(), 
+                                      ^(int t) {
+                                          if (IOPMGetSleepServicesActive()) {
+                                              printf("SleepServices are: ON\n");
+                                          } else {
+                                              printf("SleepServices are: OFF\n");
+                                          }
+                                      });
+
+    
+    if (NOTIFY_STATUS_OK != status) {
+        fprintf(stderr, "Registration failed for \"%s\" with (%u)\n",
+                kIOPMSleepServiceActiveNotifyName, status);
+    }                        
+
+    if (IOPMGetSleepServicesActive()) {
+        printf("SleepServices are: ON\n");
+    } else {
+        printf("SleepServices are: OFF\n");
+    }
+}
+
 static void install_listen_IORegisterForSystemPower(void)
 {
     io_object_t                 root_notifier = MACH_PORT_NULL;
@@ -3114,11 +3354,15 @@ static void install_listen_IORegisterForSystemPower(void)
 static void listen_for_everything(void)
 {
 
+    
+    
     install_listen_for_notify_system_power();
     
     install_listen_PM_connection();
 
     install_listen_IORegisterForSystemPower();
+    
+    install_listen_com_apple_powermanagement_sleepservices_notify();
     
     CFRunLoopRun();    
     // should never return from CFRunLoopRun
@@ -3260,22 +3504,42 @@ static void show_power_adapter(void)
         return;
     }
        
-    valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterIDKey));
-    if (valNum) {
-        CFNumberGetValue(valNum, kCFNumberIntType, &val);
-        printf(" AdapterID = 0x%04x\n", val); 
-    }
-
     valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterWattsKey));
     if (valNum) {
         CFNumberGetValue(valNum, kCFNumberIntType, &val);
         printf(" Wattage = %dW\n", val); 
     }
 
-    valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterRevisionKey));
+    valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterSourceKey));
+    if (valNum) {
+        // New format
+        CFNumberGetValue(valNum, kCFNumberIntType, &val);
+        printf(" SourceID = 0x%04x\n", val); 
+
+        valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterCurrentKey));
+        if (valNum) {
+            CFNumberGetValue(valNum, kCFNumberIntType, &val);
+            printf(" Current = %dmA\n", val); 
+        }
+
+        if ((valNum = CFDictionaryGetValue(acInfo, CFSTR("Voltage")))) {
+            CFNumberGetValue(valNum, kCFNumberIntType, &val);
+            printf(" Voltage = %dmW\n", val);
+        }
+    }
+    else {
+        valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterRevisionKey));
+        if (valNum) {
+            CFNumberGetValue(valNum, kCFNumberIntType, &val);
+            printf(" Revision = 0x%04x\n", val); 
+        }
+    }
+
+    // Legacy format
+    valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterIDKey));
     if (valNum) {
         CFNumberGetValue(valNum, kCFNumberIntType, &val);
-        printf(" Revision = 0x%04x\n", val); 
+        printf(" AdapterID = 0x%04x\n", val); 
     }
 
     valNum = CFDictionaryGetValue(acInfo, CFSTR(kIOPSPowerAdapterFamilyKey));
@@ -3641,7 +3905,8 @@ static int parseScheduledEvent(
     char                        **argv,
     int                         *num_args_parsed,
     ScheduledEventReturnType    *local_scheduled_event, 
-    bool                        *cancel_scheduled_event)
+    bool                        *cancel_scheduled_event,
+    bool                        is_relative_event)
 {
     CFDateFormatterRef          formatter = 0;
     CFStringRef                 cf_str_date = 0;
@@ -3667,7 +3932,7 @@ static int parseScheduledEvent(
     string_tolower(argv[i], argv[i]);
     
     // cancel
-    if(0 == strcmp(argv[i], ARG_CANCEL) ) {
+    if(!is_relative_event && (0 == strcmp(argv[i], ARG_CANCEL))) {
         char            *endptr = NULL;
         long            val;
         CFArrayRef      all_events = 0;
@@ -3724,33 +3989,34 @@ static int parseScheduledEvent(
     // type
     if(0 == strcmp(argv[i], ARG_SLEEP))
     {
-        local_scheduled_event->which =
-            CFStringCreateWithCString(0, kIOPMAutoSleep, kCFStringEncodingMacRoman);
+        local_scheduled_event->which = (!is_relative_event) ?
+            CFStringCreateWithCString(0, kIOPMAutoSleep, kCFStringEncodingMacRoman) : 0;
         i++;
     } else if(0 == strcmp(argv[i], ARG_SHUTDOWN))
     {
-        local_scheduled_event->which =
-            CFStringCreateWithCString(0, kIOPMAutoShutdown, kCFStringEncodingMacRoman);
+        local_scheduled_event->which = (!is_relative_event) ?
+            CFStringCreateWithCString(0, kIOPMAutoShutdown, kCFStringEncodingMacRoman) : 0;
         i++;
     } else if(0 == strcmp(argv[i], ARG_RESTART))
     {
-        local_scheduled_event->which =
-            CFStringCreateWithCString(0, kIOPMAutoRestart, kCFStringEncodingMacRoman);
+        local_scheduled_event->which = (!is_relative_event) ?
+            CFStringCreateWithCString(0, kIOPMAutoRestart, kCFStringEncodingMacRoman) : 0;
         i++;
     } else if(0 == strcmp(argv[i], ARG_WAKE))
     {
-        local_scheduled_event->which =
-            CFStringCreateWithCString(0, kIOPMAutoWake, kCFStringEncodingMacRoman);
+        local_scheduled_event->which = (!is_relative_event) ?
+            CFStringCreateWithCString(0, kIOPMAutoWake, kCFStringEncodingMacRoman) :
+            CFStringCreateWithCString(0, kIOPMAutoWakeRelativeSeconds, kCFStringEncodingMacRoman);
         i++;
     } else if(0 == strcmp(argv[i], ARG_POWERON))
     {
-        local_scheduled_event->which =
-            CFStringCreateWithCString(0, kIOPMAutoPowerOn, kCFStringEncodingMacRoman);
+        local_scheduled_event->which = (!is_relative_event) ?
+            CFStringCreateWithCString(0, kIOPMAutoPowerOn, kCFStringEncodingMacRoman) : 0;
         i++;
     } else if(0 == strcmp(argv[i], ARG_WAKEORPOWERON))
     {
-        local_scheduled_event->which =
-            CFStringCreateWithCString(0, kIOPMAutoWakeOrPowerOn, kCFStringEncodingMacRoman);
+        local_scheduled_event->which = (!is_relative_event) ?
+            CFStringCreateWithCString(0, kIOPMAutoWakeOrPowerOn, kCFStringEncodingMacRoman) : 0;
         i++;
     } else {
         printf("Error: Unspecified scheduled event type\n");
@@ -3763,28 +4029,40 @@ static int parseScheduledEvent(
         ret = kParseBadArgs;
         goto exit;
     }
-    
-    
+
     // date & time
     if(argv[i]) {
+        if (is_relative_event) {
+            char    *endptr = NULL;
+            long    secs;
 
-        string_tolower(argv[i], argv[i]);    
+            secs = strtol(argv[i], &endptr, 10);
+            if ((0 != *endptr) || !secs) {
+                ret = kParseBadArgs;
+                goto exit;
+            }
 
-        cf_str_date = CFStringCreateWithCString(kCFAllocatorDefault, 
-                        argv[i], kCFStringEncodingMacRoman);
-        if(!cf_str_date) {
-            local_scheduled_event->when = NULL;
-            ret = kParseInternalError;
-            goto exit;
+            local_scheduled_event->when = CFDateCreate(0, CFAbsoluteTimeGetCurrent() + secs);
+            i++;
+        } else {
+            string_tolower(argv[i], argv[i]);    
+
+            cf_str_date = CFStringCreateWithCString(kCFAllocatorDefault, 
+                            argv[i], kCFStringEncodingMacRoman);
+            if(!cf_str_date) {
+                local_scheduled_event->when = NULL;
+                ret = kParseInternalError;
+                goto exit;
+            }
+            local_scheduled_event->when = 
+                CFDateFormatterCreateDateFromString(
+                    0,
+                    formatter, 
+                    cf_str_date, 
+                    NULL);
+            CFRelease(cf_str_date);
+            i++;
         }
-        local_scheduled_event->when = 
-            CFDateFormatterCreateDateFromString(
-                0,
-                formatter, 
-                cf_str_date, 
-                NULL);
-        CFRelease(cf_str_date);
-        i++;
     } else {
         printf("Error: Badly formatted date\n");
         ret = kParseBadArgs;
@@ -4046,145 +4324,38 @@ static int parseArgs(int argc,
                     if(ups) apply = kApplyToUPS;
                     break;
                 case 'g':
-                    // One of the "gets"
+                    // One of the "getters"
                     if('\0' != argv[i][2]) {
                         ret = kParseBadArgs;
                         goto exit;
                     }
                     i++;
                     
-                    // is the next word NULL? then it's a "-g" arg
-                    if( (NULL == argv[i])
-                        || !strncmp(argv[i], ARG_LIVE, kMaxArgStringLength))
-                    {
-                        show_system_power_settings();
-                        show_active_profiles();
-                        show_live_pm_settings();
-                        goto exit;
-                    } else if( !strncmp(argv[i], ARG_DISK, kMaxArgStringLength)
-                            || !strncmp(argv[i], ARG_CUSTOM, kMaxArgStringLength))        
-                    {
-                        show_custom_pm_settings();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_CAP, kMaxArgStringLength))
-                    {
-                        // show capabilities
-                        show_supported_pm_features();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_SCHED, kMaxArgStringLength))
-                    {
-                        // show scheduled repeating and one-time sleep/wakeup events
-                        show_scheduled_events();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_UPS, kMaxArgStringLength))
-                    {
-                        // show UPS
-                        show_ups_settings();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_SYS_PROFILES, kMaxArgStringLength))
-                    {
-                        // show profiles
-                        show_active_profiles();
-                        show_system_profiles();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_ADAPTER_AC, kMaxArgStringLength)
-                           || !strncmp(argv[i], ARG_ADAPTER, kMaxArgStringLength))
-                    {
-                        show_power_adapter();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_PS, kMaxArgStringLength)
-                           || !strncmp(argv[i], ARG_BATT, kMaxArgStringLength))
-                    {
-                        // show battery & UPS state
-                        show_power_sources(kApplyToBattery | kApplyToUPS);
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_PSLOG, kMaxArgStringLength))
-                    {
-                        // continuously log PS changes until user ctrl-c exits
-                        // or return kParseInternalError if something screwy happened
-                        log_power_source_changes(kApplyToBattery | kApplyToUPS);
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_TRCOLUMNS, kMaxArgStringLength))
-                    {
-                        // continuously log time remaining into column format
-                        log_power_source_changes(kShowColumns);
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_PSRAW, kMaxArgStringLength))
-                    {
-                        // continuously log PS changes until user ctrl-c exits
-                        // log via interest notes on the IOPMPowerSource nodes
-                        log_raw_power_source_changes();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_THERMLOG, kMaxArgStringLength))
-                    {
-                        // continuously log thermal events until user ctrl-c
-                        // exits
-                        log_thermal_events();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_ASSERTIONS, kMaxArgStringLength))
-                    {
-                        // show assertions
-                        show_assertions();
-                        goto exit;
-                    } else if(!strncmp(argv[i], ARG_ASSERTIONSLOG, kMaxArgStringLength))
-                    {
-                        // continuously log assertion events until user ctrl-c
-                        // exits
-                        log_assertions();
-                        goto exit;
-                    } else if (!strncmp(argv[i], ARG_SYSLOAD, kMaxArgStringLength))
-                    {
-                        show_systemload();
-                        goto exit;
-                    } else if (!strncmp(argv[i], ARG_SYSLOADLOG, kMaxArgStringLength))
-                    {
-                        log_systemload();
-                        goto exit;
-                    } else if (!strncmp(argv[i], ARG_LOG, kMaxArgStringLength))
-                    {
-                        show_log();
-                        goto exit;
-                    } else if (!strncmp(argv[i], ARG_LISTEN, kMaxArgStringLength))
-                    {
-                        listen_for_everything();
-                        goto exit;
-                    } else if (!strncmp(argv[i], ARG_HISTORY, kMaxArgStringLength))
-                    {
-                        show_power_event_history();
-                        goto exit;
-                    } else if (!strncmp(argv[i], ARG_HISTORY_DETAILED, kMaxArgStringLength))
-                    {
-                        show_power_event_history_detailed();
-                        goto exit;
-                    } else if( !strncmp(argv[i], ARG_SEARCH, kMaxArgStringLength) && argv[i+1])
-                    {
-                        // We need to convert the UUID string to upper case. 
-                        string_toupper(argv[i+1], argv[i+1]);
-                        show_details_for_UUID(argv[i+1]);
-                        goto exit;
-                    } else if (!strncmp(argv[i], ARG_HID_NULL, kMaxArgStringLength))
-                    {
-                        show_NULL_HID_events();
-                        goto exit;
-					} else if (!strncmp(argv[i], ARG_USERCLIENTS, kMaxArgStringLength))
-					{
-						show_root_domain_user_clients();
-						goto exit;
-                    } else if (!strncmp(argv[i], ARG_UUID, kMaxArgStringLength))
-                    {
-                        show_uuid(false);
-                    } else if (!strncmp(argv[i], ARG_UUID_LOG, kMaxArgStringLength))
-                    {
-                        show_uuid(true);
-                    } else if (!strncmp(argv[i], ARG_ACTIVITY, kMaxArgStringLength))
-                    {
-                        show_activity(false);
-                    } else if (!strncmp(argv[i], ARG_ACTIVITYLOG, kMaxArgStringLength))
-                    {
-                        show_activity(true);
-                    } else {
+                    const char *canonical_arg = getCanonicalArgForSynonym(argv[i]);
+                    if (!canonical_arg) {
                         ret = kParseBadArgs;
                         goto exit;
+                    }
+
+                    int getter_iterator;
+                    bool handled_getter_arg = false;
+                    for (getter_iterator=0; getter_iterator<the_getters_count; getter_iterator++) {
+                        if (!strncmp(the_getters[getter_iterator].arg, canonical_arg, kMaxArgStringLength)) {
+                            the_getters[getter_iterator].action();
+                            handled_getter_arg = true;
+                            break;
+                        }                        
+                    }
+                    if (!handled_getter_arg)
+                    {
+                        // TODO: ARG_SEARCH is the only getter that's not described in the
+                        // "the_getters" array. If possible, we should fit it in there too.
+                        if (!strncmp(canonical_arg, ARG_SEARCH, kMaxArgStringLength) && argv[i+1] )
+                        {                        
+                            string_toupper(argv[i+1], argv[i+1]);
+                            show_details_for_UUID(argv[i+1]);
+                            goto exit;
+                        }
                     }
 
                     // return immediately - don't handle any more setting arguments
@@ -4215,7 +4386,32 @@ static int parseArgs(int argc,
                             &(argv[i]),
                             &args_parsed,
                             local_scheduled_event, 
-                            &local_cancel_event);
+                            &local_cancel_event,
+                            false);
+            if(kParseSuccess != ret)
+            {
+                goto exit;
+            }
+
+            i += args_parsed;
+            modified |= kModSched;
+        } else if(0 == strncmp(argv[i], ARG_RELATIVE, kMaxArgStringLength))
+        {
+            // Process rest of input as a relative power event
+            int args_parsed;
+
+            local_scheduled_event = scheduled_event_struct_create();
+            if(!local_scheduled_event) {
+                ret = kParseInternalError;
+                goto exit;
+            }
+            i += 1;
+            ret = parseScheduledEvent(
+                            &(argv[i]),
+                            &args_parsed,
+                            local_scheduled_event, 
+                            &local_cancel_event,
+                            true);
             if(kParseSuccess != ret)
             {
                 goto exit;
@@ -4254,6 +4450,24 @@ static int parseArgs(int argc,
           {
             set_new_power_bookmark();
             goto exit;
+          } else if(0 == strncmp(argv[i], ARG_DEBUGFLAGS, kMaxArgStringLength))
+          {
+             if (argv[i+1])
+                set_debugFlags(&argv[i+1]);
+              else
+                  printf("Error: You need to specify debug flags value\n");
+              goto exit;
+          } else if(0 == strncmp(argv[i], ARG_BTINTERVAL, kMaxArgStringLength))
+          {
+              if(argv[i+1])
+                set_btInterval(&argv[i+1]);
+              else
+                  printf("Error: You need to specify an interval in seconds\n");
+              goto exit;
+          } else if (0 == strncmp(argv[i], ARG_MT2BOOK, kMaxArgStringLength))
+          {
+              mt2bookmark();
+              goto exit;
           } else if(0 == strncmp(argv[i], ARG_BOOT, kMaxArgStringLength))
           {
               // Tell kernel power management that bootup is complete
@@ -4581,15 +4795,9 @@ static int parseArgs(int argc,
                                      CFSTR(kIOPMPrioritizeNetworkReachabilityOverSleepKey), 
                                      apply, false, kNoMultiplier,
                                      ac, battery, ups))
-                    return kParseBadArgs;
-                modified |= kModSettings;
-                i+=2;
-            } else if (0 == strncmp(argv[i], ARG_PANICRESTART, kMaxArgStringLength))
-            {
-                if (-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMRestartOnKernelPanicKey), apply, false, kNoMultiplier, ac, battery, ups))
                 {
                     ret = kParseBadArgs;
-                    goto exit;                    
+                    goto exit;
                 }
                 modified |= kModSettings;
                 i+=2;
@@ -4598,7 +4806,10 @@ static int parseArgs(int argc,
                 if(-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMDeepSleepEnabledKey), 
                                              apply, false, kNoMultiplier,
                                              ac, battery, ups))
-                    return kParseBadArgs;
+                {
+                    ret = kParseBadArgs;
+                    goto exit;
+                }
                 modified |= kModSettings;
                 i+=2;
             } else if(0 == strncmp(argv[i], ARG_DEEPSLEEPDELAY, kMaxArgStringLength))
@@ -4606,7 +4817,24 @@ static int parseArgs(int argc,
                 if(-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMDeepSleepDelayKey), 
                                              apply, false, kNoMultiplier,
                                              ac, battery, ups))
-                    return kParseBadArgs;
+                {
+                    ret = kParseBadArgs;
+                    goto exit;
+                }
+                modified |= kModSettings;
+                i+=2;
+            } else if(0 == strncmp(argv[i], ARG_DARKWAKES, kMaxArgStringLength))
+            {
+                if((-1 == checkAndSetIntValue(argv[i+1],
+                            CFSTR(kIOPMDarkWakeBackgroundTaskKey), apply,
+                            false, kNoMultiplier, ac, battery, ups)) ||
+                    (-1 == checkAndSetIntValue(argv[i+1],
+                             CFSTR(kIOPMSleepServicesKey), apply, false,
+                             kNoMultiplier, ac, battery, ups)))
+                {
+                    ret = kParseBadArgs;
+                    goto exit;
+                }
                 modified |= kModSettings;
                 i+=2;
             } else {
@@ -4822,8 +5050,12 @@ static IOReturn _pm_connect(mach_port_t *newConnection)
     if(!newConnection) return kIOReturnBadArgument;
 
     // open reference to PM configd
-    kern_result = bootstrap_look_up(bootstrap_port, 
-            kIOPMServerBootstrapName, newConnection);    
+    kern_result = bootstrap_look_up2(bootstrap_port, 
+                                    kIOPMServerBootstrapName, 
+                                    newConnection, 
+                                    0, 
+                                    BOOTSTRAP_PRIVILEGED_SERVER);    
+
     if(KERN_SUCCESS != kern_result) {
         return kIOReturnError;
     }
@@ -4899,28 +5131,23 @@ static aslresponse _messageTracerSearchResults(void)
      */
     query = (aslresponse)calloc(1, sizeof(asl_search_result_t));
     if (!query) {
-        return NULL;
+        goto exit;
     }
     query->msg = (asl_msg_t **)calloc(1, sizeof(asl_msg_t *));
     if (!query->msg) {
-        free(query);
-        return NULL;
+        goto exit;
     }
     
     // add a query clause which matches any messages with a com.apple.message.domain key 
-    asl_msg_t *clause = asl_msg_new(ASL_TYPE_QUERY);
-    if (!clause) {
-        free(query->msg);
-        free(query);
-        return NULL;
-    }
+    query->msg[0] = asl_msg_new(ASL_TYPE_QUERY);
+    query->msg[1] = asl_msg_new(ASL_TYPE_QUERY);
+    query->count = 2;
     
-    asl_msg_set_key_val_op(clause, "com.apple.message.domain", "com.apple.powermanagement",
-        ASL_QUERY_OP_EQUAL | ASL_QUERY_OP_PREFIX); 
-
-    query->msg[query->count] = clause;
-    query->count++;
-
+    asl_msg_set_key_val_op(query->msg[0], "com.apple.message.domain", kMsgTracerPrefixPM,
+                           ASL_QUERY_OP_EQUAL | ASL_QUERY_OP_PREFIX); 
+    asl_msg_set_key_val_op(query->msg[1], "com.apple.message.domain", kMsgTracerPrefixSleepServices,
+                           ASL_QUERY_OP_EQUAL | ASL_QUERY_OP_PREFIX); 
+ 
     uint64_t        endMessageID = 0;
     matchStatus = asl_file_list_match(db_files, query, &response, &endMessageID, 0, 0, 1);
     asl_file_list_close(db_files);
@@ -4929,8 +5156,15 @@ static aslresponse _messageTracerSearchResults(void)
         response = 0;
 exit:    
     if (query) {
-        asl_msg_release(query->msg[0]);
-        free(query->msg);
+        if (query->msg[0]) {
+            asl_msg_release(query->msg[0]);
+        }
+        if (query->msg[1]) {
+            asl_msg_release(query->msg[1]);
+        }
+        if (query->msg) {
+            free(query->msg);
+        }
         free(query);
     }
     return response;
@@ -4948,6 +5182,54 @@ static aslresponse _pmASLSearchResults(void)
     return response;
 }
 
+/*
+ * Cache the message in a temp ring buffer. 
+ *
+ * ASL doesn't allow re-positioning the current read pointer into 
+ * aslresponse. There is no aslresponse_prev() API. So, we 
+ * store the message retrieved from aslreponse in a ring
+ * buffer.
+ */
+static aslmsg _cacheAndGetMsg(aslresponse MT)
+{
+   aslmsg msg = NULL;
+
+   if (msgCache == NULL) 
+   {
+      msgCache = calloc(1, sizeof(MsgCache));
+      if (!msgCache) return NULL;
+   }
+
+   if (((msgCache->writeIdx+1) % RING_SIZE) == msgCache->readIdx)
+      return NULL; /* overflow */
+
+   msg = aslresponse_next(MT);
+   if (!msg) return NULL;
+
+   msgCache->msgRing[msgCache->writeIdx] = msg;
+
+   msgCache->writeIdx = (msgCache->writeIdx+1) % RING_SIZE;
+   return  msg;
+}
+
+/*
+ * Get a cached message from the ring buffer. 
+ */
+static aslmsg  _getCachedMsg( )
+{
+   aslmsg msg;
+   
+   if (msgCache == NULL)
+      return NULL;
+
+   if (msgCache->readIdx == msgCache->writeIdx)
+      return NULL; /* Empty ring */
+
+   msg = msgCache->msgRing[msgCache->readIdx];
+   msgCache->readIdx = (msgCache->readIdx+1) % RING_SIZE;
+
+   return msg;
+}
 static aslmsg _my_next_response(aslresponse MT, aslresponse PM)
 {
     static aslmsg   MT_NEXT = 0;
@@ -4965,8 +5247,12 @@ static aslmsg _my_next_response(aslresponse MT, aslresponse PM)
  * It empties both arrays, returning messages one at a time.
  */
 
-    if (0 == MT_NEXT && !MT_FINISHED) {
-        MT_NEXT = aslresponse_next(MT);
+    if (0 == MT_NEXT) {
+       MT_NEXT = _getCachedMsg( );
+        
+       if (0 == MT_NEXT && !MT_FINISHED) {
+           MT_NEXT = aslresponse_next(MT);
+        }
     }
     if (0 == PM_NEXT && !PM_FINISHED) {
         PM_NEXT = aslresponse_next(PM);
@@ -5008,6 +5294,109 @@ exit:
     return RET;
 }
 
+/*
+ * Called when current event is 'Sleep', to find out
+ * the time stamp of next wake event.
+ *
+ * Possible transitions:
+ * Sleep -> Wake
+ * Sleep -> DarkWake
+ */
+
+static int32_t _getNextWakeTime(aslresponse MT)
+{
+   const char *domain = NULL;
+   const char *timeStr = NULL;
+   int32_t wakeTime = -1;
+   aslmsg MT_NEXT;
+
+   do {
+
+      if ((MT_NEXT = _cacheAndGetMsg(MT)) == NULL) break;
+
+      domain = asl_get(MT_NEXT, kMsgTracerDomainKey);
+      if (!domain) break;
+
+      if ( (!strncmp(kMsgTracerDomainPMWake, domain, sizeof(kMsgTracerDomainPMWake) )) ||
+            (!strncmp(kMsgTracerDomainPMDarkWake, domain, sizeof(kMsgTracerDomainPMDarkWake) )) )
+      {
+         timeStr = asl_get(MT_NEXT, ASL_KEY_TIME);
+         if (timeStr)
+            wakeTime = atol(timeStr);
+         break;
+      }
+      else if (!strncmp(kMsgTracerDomainPMSleep, domain, sizeof(kMsgTracerDomainPMSleep) ))
+      {
+          /* Came across another sleep trace. Wake trace is missing */
+          break;
+      }
+   } while(1);
+
+   return wakeTime;
+}
+
+/*
+ * Called when current event is 'wake/darkWake', to find out
+ * the time stamp of next sleep/wake event.
+ *
+ * Possible transitions:
+ * Wake -> Sleep
+ * DarkWake -> Sleep
+ * DarkWake -> Wake
+ */
+static int32_t _getNextSleepTime(aslresponse MT, const char *curr_domain)
+{
+   const char *domain = NULL;
+   const char *timeStr = NULL;
+   int32_t sleepTime = -1;
+   uint32_t sleepCnt = 0;
+   aslmsg MT_NEXT;
+
+   do {
+
+
+      if ((MT_NEXT = _cacheAndGetMsg(MT)) == NULL) break;
+      domain = asl_get(MT_NEXT, kMsgTracerDomainKey);
+      if (!domain) break;
+
+      /* Check for events with unexpected transitions */ 
+      if (( !strncmp(kMsgTracerDomainPMWake, curr_domain, sizeof(kMsgTracerDomainPMWake) )) &&
+          ( (!strncmp(kMsgTracerDomainPMWake, domain, sizeof(kMsgTracerDomainPMWake) )) ||
+            (!strncmp(kMsgTracerDomainPMDarkWake, domain, sizeof(kMsgTracerDomainPMDarkWake)) )
+          ))
+      {
+          /* Wake -> Wake or Wake -> DarkWake is unexpected */
+          break;
+      }
+
+      else if ((!strncmp(kMsgTracerDomainPMDarkWake, curr_domain, sizeof(kMsgTracerDomainPMDarkWake))) &&
+               (!strncmp(kMsgTracerDomainPMDarkWake, domain, sizeof(kMsgTracerDomainPMDarkWake)) ))
+      {
+          /* DarkWake ->  DarkWake is unexpected */
+          break;
+      }
+
+      if ( (!strncmp(kMsgTracerDomainPMSleep, domain, sizeof(kMsgTracerDomainPMSleep) )) ||
+               (!strncmp(kMsgTracerDomainPMWake, domain, sizeof(kMsgTracerDomainPMWake) )) )
+      {
+         const char *value1 = asl_get(MT_NEXT, kMsgTracerValueKey);
+         if (value1) {
+            sleepCnt = strtol(value1, NULL, 0);
+            
+            if (sleepCnt == 1)
+               break;  /* System rebooted at this point */
+         }
+
+         timeStr = asl_get(MT_NEXT, ASL_KEY_TIME);
+         if (timeStr)
+            sleepTime = atol(timeStr);
+         break;
+      }
+   } while(1);
+
+   return sleepTime;
+}
+
 /* All PM messages in ASL log */
 static void show_log(void)
 {
@@ -5015,6 +5404,10 @@ static void show_log(void)
     aslresponse         msgtracer_response = 0;
     aslresponse         pm_response = 0;
     aslmsg              m = 0;
+    char                uuid[100];
+    long                sleep_cnt = 0;
+    int                 dark_wake_cnt = 0;
+    bool                first_iter = true;
 
     msgtracer_response = _messageTracerSearchResults();    
     pm_response = _pmASLSearchResults();
@@ -5028,118 +5421,137 @@ static void show_log(void)
     printf("Power Management ASL logs.\n");
     printf("-> All messages with \"com.apple.message.domain\" key set to \"com.apple.powermanagement\".)\n");
 
+
+    uuid[0] = 0;
     // We performed TWO searches of the ASL database - one for our MessageTracer messages, the other for non-MT
     // messages in the main ASL database. We iterate through the results in sorted-by-date order to print them.
     while ((m = _my_next_response(msgtracer_response, pm_response)))
     {
-        const char                  *val = NULL;
-        bool    isHibernateStats    = false;
-        bool    isSleep             = false;
-        bool    isAppResponse       = false;
-        bool    isMessageTracer     = false;
-
-        printf("\n");
+        const char    *val = NULL;
+        int32_t      nextEventTime = 0;
+        uint32_t      time_read = 0;
+        char          buf[40];
+        bool          duration = false;
 
         if ((val = asl_get(m, kMsgTracerDomainKey)))
-        {   
-            isMessageTracer = true;
-            printf(" * Domain: %s\n",  ((char *)val + (uintptr_t)strlen("com.apple.powermanagement.")));
-    
-            if (!strncmp(kMsgTracerDomainPMSleep, val, sizeof(kMsgTracerDomainPMSleep) - 1)) 
+        {
+            if (!strncmp(val, kMsgTracerPrefixSleepServices, sizeof(kMsgTracerPrefixSleepServices)-1)
+            && strncmp(val, kMsgTracerDomainSleepServiceStarted, sizeof(kMsgTracerDomainSleepServiceStarted))
+            && strncmp(val, kMsgTracerDomainSleepServiceCapApp, sizeof(kMsgTracerDomainSleepServiceCapApp))
+            && strncmp(val, kMsgTracerDomainSleepServiceTerminated, sizeof(kMsgTracerDomainSleepServiceTerminated)))
             {
-                isSleep = true;
-            } else if (!strncmp(kMsgTracerDomainHibernateStatistics, val, sizeof(kMsgTracerDomainHibernateStatistics) - 1)) 
-            {
-                isHibernateStats = true;
-            } else if (!strncmp(kMsgTracerDomainAppResponse, val, sizeof(kMsgTracerDomainAppResponse) - 1)) 
-            {
-                isAppResponse = true;
+                // We have no interest in these other SleepServices logs.
+                continue;
             }
         }
-        
-        if ((val = asl_get(m, ASL_KEY_MSG)))
+
+        if ((val = asl_get(m, kMsgTracerUUIDKey)) && (strncmp( val, uuid, sizeof(uuid)) != 0) ) 
         {
-            printf(" - Message: %s\n", val);
+            // New Sleep cycle is about to begin
+            // Print Sleep cnt and dark wake cnt of previous sleep/wake cycle
+            if ( !first_iter )
+            {
+               printf("Sleep/Wakes since boot:%ld   Dark Wake Count in this sleep cycle:%d\n", sleep_cnt, dark_wake_cnt);
+            }
+            first_iter = false;
+
+            printf("\n");   // Extra line to seperate from previous sleep/wake cycles
+            dark_wake_cnt = 0;
+
+            // Print the header for each column
+            printf("%-25s %-20s\t%-75s\t%-10s\t%-10s\n", "Time stamp", "Domain", "Message", "Duration", "Delay");
+            printf("%-25s %-20s\t%-75s\t%-10s\t%-10s\n", "==========", "======", "=======", "========", "=====");
+
+            // Print and save UUID of the new cycle
+            snprintf(uuid, sizeof(uuid), "%s", val);
+            printf("UUID: %s\n", val);
+            sleep_cnt = 0;
         }
-        
+
+        // Time
         if ((val = asl_get(m, ASL_KEY_TIME))) 
         {
-            uint32_t    time_read = atol(val);
+            time_read = atol(val);
             CFAbsoluteTime  abs_time = (CFAbsoluteTime)(time_read - kCFAbsoluteTimeIntervalSince1970);
-            printf(" - Time: ");
-            print_pretty_date(abs_time, true);
-        }
-        
-        if ((val = asl_get(m, kMsgTracerSignatureKey)))
-        {
-            printf(" - Signature: %s\n", val);
-        }
-        
-        if ((val = asl_get(m, kMsgTracerUUIDKey)))
-        {
-            printf(" - UUID: %s\n", val);
+            print_pretty_date(abs_time, false);
         }
 
-        if ((val = asl_get(m, kMsgTracerResultKey)))
-        {
-            printf(" - Result: %s\n", val);
-        }
-        
-        if ((val = asl_get(m, "RetainCount")))
-        {
-            printf(" - Retain Count: %s\n", val);
-        }
-        
-        if ((val = asl_get(m, kPMASLPIDKey)))
-        {
-            printf(" - PID: %s\n", val);
-        }
 
-        if ((val = asl_get(m, kPMASLAssertionNameKey)))
-        {
-            char *plural = "";
-            int count = strlen(val);
-            int i = 0;
-
-            /* kPMASLAssertionNameKey is a space delimited list of PM Assertion Types.
-             * If the string contains a space, then there are more than one assertion.
-             */
-            for (i = 0; i < count; i++) {
-                if (' ' == val[i]) {
-                    plural = "s";
-                    break;
-                }
-            }
-            
-            printf(" - Assertion Type%s: %s\n", plural, val);
-        }
-        
-        if ((val = asl_get(m, kPMASLActionKey)))
-        {
-            printf(" - Action: %s\n", val);
-        }
-        
-        if (isMessageTracer)
-        {
+        // Domain
+        if ((val = asl_get(m, kMsgTracerDomainKey)))
+        {   
             const char *value1 = asl_get(m, kMsgTracerValueKey);
-            const char *value2 = asl_get(m, kMsgTracerValue2Key);
-            
-            if (isSleep && value1) {
-                printf(" - Sleep count : %s\n", value1);
-            } else
-            if (isHibernateStats) {
-                if (value1 && strncmp(value1, "0", strlen(value1))) {
-                    printf(" - Time to write image (ms): %s\n", value1);
-                }
-                if (value2 && strncmp(value2, "0", strlen(value2))) {
-                    printf(" - Time to read image (ms): %s\n", value2);
-                }
-            } else
-            
-            if (isAppResponse && value1) {
-                printf(" - Response time (ms): %s\n", value1);
+            char *omit_prefix = "";
+
+            // Trim off the boring prefixes
+            if (strnstr(val, "ApplicationResponse", strlen(val))) {
+               printf("%-20s\t",  ((char *)val + (uintptr_t)strlen("com.apple.powermanagement.ApplicationResponse.")));
             }
-        }        
+            else {
+                if (!strncmp(val, kMsgTracerPrefixPM, sizeof(kMsgTracerPrefixPM)-1)) {
+                    omit_prefix = kMsgTracerPrefixPM;
+                } else if (!strncmp(val, kMsgTracerPrefixSleepServices, sizeof(kMsgTracerPrefixSleepServices)-1)) {
+                    omit_prefix = kMsgTracerPrefixSleepServices;
+                }
+
+                printf("%-20s\t",  ((char *)val + (uintptr_t)strlen(omit_prefix)));
+            }
+    
+            if (!strncmp(kMsgTracerDomainPMSleep, val, sizeof(kMsgTracerDomainPMSleep) )) 
+            {
+               if (value1)
+                   sleep_cnt = strtol(value1, NULL, 0);
+                if ( (nextEventTime = _getNextWakeTime(msgtracer_response)) != -1)
+                   duration = true;
+            }
+            else if (!strncmp(kMsgTracerDomainPMDarkWake, val, sizeof(kMsgTracerDomainPMDarkWake) ))
+            {
+               if (value1)
+                  dark_wake_cnt = strtol(value1, NULL, 0);
+               if( (nextEventTime = _getNextSleepTime(msgtracer_response, val)) != -1)
+                  duration = true;
+            }
+            else if (!strncmp(kMsgTracerDomainPMWake, val, sizeof(kMsgTracerDomainPMWake) ))
+            {
+               if ( (nextEventTime = _getNextSleepTime(msgtracer_response, val)) != -1)
+                  duration = true;
+            }
+        }
+        else 
+        {
+            printf("%-20s\t",  " ");
+        }
+        
+        // Message
+        if ((val = asl_get(m, ASL_KEY_MSG)))
+        {
+            printf("%-75s\t", val);
+        }
+        else 
+        {
+            printf("%-75s\t",  " ");
+        }
+        
+        // Duration/Delay
+        if (duration)
+        {
+           if (nextEventTime)
+              snprintf(buf, sizeof(buf), "%d secs", (nextEventTime-time_read));
+           else
+              buf[0] = 0;
+           printf("%-10s", buf);
+        }
+        else if ((val = asl_get(m, kMsgTraceDelayKey)))
+        {   
+            printf("%-10s\t", ""); /* Skip duration column */
+            printf("%-10s\t", val);
+        }
+        
+        printf("\n");
+    }
+
+    if (sleep_cnt || dark_wake_cnt) {
+        printf("\nTotal Sleep/Wakes since boot:%ld\n", sleep_cnt);
     }
 }
 
@@ -5368,6 +5780,19 @@ static void printHistoryDetailedEventDictionary(CFDictionaryRef event)
     printf("\n");
 }
 
+static void mt2bookmark(void)
+{
+    mach_port_t     connectIt = MACH_PORT_NULL;
+    int disregard;
+    
+    if (kIOReturnSuccess == _pm_connect(&connectIt))
+    {
+        io_pm_get_value_int(connectIt, kIOPMMT2Bookmark, &disregard);
+        _pm_disconnect(connectIt);
+    }
+    return;
+}
+
 
 static void show_power_event_history_detailed(void)
 {
@@ -5418,6 +5843,43 @@ exit:
     return;
 }
 
+static void set_debugFlags(char **argv)
+{
+    uint32_t  newFlags, oldFlags;
+    IOReturn err;
+
+    newFlags = strtol(argv[0], NULL, 0);
+    if (errno == EINVAL ) {
+        printf("Invalid argument\n");
+        return;
+    }
+    err = IOPMSetDebugFlags(newFlags, &oldFlags);
+    if (err == kIOReturnSuccess)
+        printf("Debug flags changed from 0x%x to 0x%x\n",
+                oldFlags, newFlags);
+    else
+        printf("Failed to change debugFlags. err=0x%x\n", err);
+
+}
+
+static void set_btInterval(char **argv)
+{
+    uint32_t  newInterval, oldInterval;
+    IOReturn err;
+
+    newInterval = strtol(argv[0], NULL, 0);
+    if (errno == EINVAL ) {
+        printf("Invalid argument\n");
+        return;
+    }
+    err = IOPMSetBTWakeInterval(newInterval, &oldInterval);
+    if (err == kIOReturnSuccess)
+        printf("Background task wake interval changed from %d secs to %d secs\n",
+                oldInterval, newInterval);
+    else
+        printf("Failed to change Background task wake interval. err=0x%x\n", err);
+
+}
 
 static void set_new_power_bookmark(void) {
   char uuid[1024];
@@ -5440,11 +5902,13 @@ static void show_details_for_UUID( char *uuid_cstr ) {
   if (kIOReturnSuccess != ret)
   {
     printf("No power management history to display for this UUID! \n");
+      CFRelease(uuid);
     return;
   }
   if (!uuid_details) 
   {
     printf("No power management history available for this UUID! \n");
+    CFRelease(uuid);
     return;
   }
         
@@ -5670,7 +6134,34 @@ exit:
         CFRelease(systemHIDEvents);
     return;
 }
+static bool is_display_dim_captured(void)
+{
+    io_registry_entry_t disp_wrangler = IO_OBJECT_NULL;
+    CFBooleanRef dimCaptured          = NULL;
+    bool ret                          = false;
 
+    disp_wrangler = IORegistryEntryFromPath(
+                            kIOMasterPortDefault,
+                            kIOServicePlane ":/IOResources/IODisplayWrangler");
+    if(!disp_wrangler)
+        return false;
+
+    dimCaptured = IORegistryEntryCreateCFProperty(
+                        disp_wrangler,
+                        CFSTR("DimCaptured"),
+                        kCFAllocatorDefault,
+                        kNilOptions);
+
+    if(dimCaptured)
+    {
+        ret = (kCFBooleanTrue == dimCaptured);
+        CFRelease(dimCaptured);
+    }
+
+    IOObjectRelease(disp_wrangler);
+
+    return ret;
+}
 #define kRootDomainUserClientClass 	"RootDomainUserClient"
 static void show_root_domain_user_clients(void)
 {
@@ -5706,6 +6197,9 @@ static void show_root_domain_user_clients(void)
 			{
 				printf(" - %s\n", stringBuf);
 			}
+            
+            if(creatorString)
+                CFRelease(creatorString);
 		}
 	}
 	
@@ -5715,5 +6209,26 @@ static void show_root_domain_user_clients(void)
 	return;
 }
 
+static void show_getters(void)
+{
+    int i = 0;
+    for (i=0; i<the_getters_count; i++) 
+    {
+        if (the_getters[i].actionType == kActionGetOnceNoArgs) {
+            printf("%s\n", the_getters[i].arg);
+        }
+    }
+}
 
+static void show_everything(void)
+{
+    printf("pmset is invoking all non-blocking -g arguments");
+    int i=0;
+	for (i=0; i<the_getters_count; i++) {
+	    if (the_getters[i].actionType == kActionGetOnceNoArgs) {	    
+            printf("\nINVOKE: pmset -g %s\n", the_getters[i].arg);
+            the_getters[i].action();
+        }
+    }    
+}
 

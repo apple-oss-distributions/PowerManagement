@@ -44,14 +44,22 @@
 #include "PMStore.h"
 
 #ifndef kIOPSFailureKey
-#define kIOPSFailureKey "Failure"
+#define kIOPSFailureKey                         "Failure"
+#endif
+
+#define kBatteryPermFailureString               "Permanent Battery Failure"
+
+#ifndef kIOPMBatteryPercentageFactors
+#define kIOPMBatteryPercentageFactors           CFSTR("IOPMBatteryPercentageFactors")
 #endif
 
 #ifndef kIOPSDynamicStorePowerAdapterKey
-#define kIOPSDynamicStorePowerAdapterKey "/IOKit/PowerAdapter"
+#define kIOPSDynamicStorePowerAdapterKey        "/IOKit/PowerAdapter"
 #endif
 
-#define kBatteryPermFailureString "Permanent Battery Failure"
+#ifndef kIOPSDynamicStoreLowBattPathKey
+#define kIOPSDynamicStoreLowBattPathKey         "/IOKit/LowBatteryWarning"
+#endif
 
 /**** PMBattery configd plugin
   We clean up, massage, and re-package the data from the batteries and publish
@@ -110,6 +118,7 @@ enum {
 
 #define kMaxBattMinutes     1200
 
+
 // static global variables for tracking battery state
 static CFAbsoluteTime   _estimatesInvalidUntil = 0.0;
 static int              _systemBatteryWarningLevel = 0;
@@ -124,10 +133,10 @@ static int              _psTimeRemainingNotifyToken = 0;
 static void             _initializeBatteryCalculations(void);
 static int              _populateTimeRemaining(IOPMBattery **batts);
 static void             _packageBatteryInfo(CFDictionaryRef *);
-static bool             _shouldTrustBatteryTimeEstimate(IOPMBattery *b);
 static void             _timeRemainingMaybeValid(CFRunLoopTimerRef timer, void *info);
 static void             _discontinuityOccurred(void);
 static IOReturn         _readAndPublishACAdapter(bool, CFDictionaryRef);
+
 
 __private_extern__ void
 BatteryTimeRemaining_prime(void)
@@ -297,6 +306,7 @@ BatteryTimeRemainingBatteriesHaveChanged(IOPMBattery **batteries)
     if (!batteries) {
         batteries = _batteries();
     }
+
 
     result = (CFDictionaryRef *) calloc(1, batCount * sizeof(CFDictionaryRef));
     
@@ -477,45 +487,32 @@ BatteryTimeRemainingBatteriesHaveChanged(IOPMBattery **batteries)
      * PUBLISH: SCDynamicStoreSetValue
      *
      ************************************************************************/
-    for(i=0; i<batCount; i++) 
+    for(i=0; i<batCount; i++)
     {
-        if(result[i]) {   
+        if(result[i]) 
+        {   
             // Determine if CFDictionary is new or has changed...
             // Only do SCDynamicStoreSetValue if the dictionary is different
-            if(!old_battery[i]) {
+            if( !old_battery[i] || !CFEqual(old_battery[i], result[i]))
+            {
                 PMStoreSetValue(batteries[i]->dynamicStoreKey, result[i]);
-            } else {
-                if(!CFEqual(old_battery[i], result[i])) {
-                    PMStoreSetValue(batteries[i]->dynamicStoreKey, result[i]);
-                }
+            }
+            
+            if (old_battery[i]) {
                 CFRelease(old_battery[i]);
             }
+
             old_battery[i] = result[i];
         }
     }
     
-    if(result) free(result);
-}
-
-/* _shouldTrustBatteryTimeEstimate
- *  - Intel Smart batteries provide a good time remaining to empty/to full estimate.
- *  - Certain batteries (as indicated by the 'BALG' SMC key) can be trusted to
- *      provide a reliable time remaining estimate. Other batteries shall not be 
- *      trusted.
- */
-static bool _shouldTrustBatteryTimeEstimate(IOPMBattery *b)
-{
-    static int            return_val = -1;
-
-    if (return_val == -1) {
-        uint32_t        outVal;
-        bool            keyFound;
-        keyFound = (kIOReturnSuccess == _getSystemManagementKeyInt32('BALG', &outVal));
-        return_val = (keyFound && _batteryHas(b, CFSTR(kIOPMPSTimeRemainingKey)));
+    if(result) {
+        free(result);
     }
-
-    return (return_val != -1) ? return_val: false;    
 }
+
+
+
 
 /* _populateTimeRemaining
  * Implicit inputs: battery state; battery's own time remaining estimate
@@ -580,32 +577,26 @@ static int _populateTimeRemaining(IOPMBattery **batts)
             continue;
         } 
                         
-        // We proceed to actually calculating the time remaining now...
-        if (_shouldTrustBatteryTimeEstimate(b))
-        {
-            /* Battery time remaining estimate is provided directly by the battery
-             * firmware (only on supported hardware).
-             */
+#if 0
+    /* Battery time remaining estimate is provided directly by the battery.
+     */
+        b->swCalculatedTR = b->hwAverageTR;
+#endif
 
-            b->swCalculatedTR = b->hwAverageTR;
+        /* Manually calculate battery time remaining.
+         */
 
+        if (0 == b->avgAmperage) {
+            b->swCalculatedTR = -1;
         } else {
-
-            /* Manually calculate battery time remaining.
-             */
-
-            if (0 == b->avgAmperage) {
-                b->swCalculatedTR = -1;
-            } else {
-                if(b->isCharging) {
-                    // h = -mAh/mA
-                    b->swCalculatedTR = 60*((double)(b->maxCap - b->currentCap)
-                                        / (double)b->avgAmperage);                                
-                } else { // discharging
-                    // h = mAh/mA
-                    b->swCalculatedTR = -60*((double)b->currentCap
-                                        / (double)b->avgAmperage);
-                }
+            if(b->isCharging) {
+                // h = -mAh/mA
+                b->swCalculatedTR = 60*((double)(b->maxCap - b->currentCap)
+                                    / (double)b->avgAmperage);                                
+            } else { // discharging
+                // h = mAh/mA
+                b->swCalculatedTR = -60*((double)b->currentCap
+                                    / (double)b->avgAmperage);
             }
         }
 
@@ -786,9 +777,7 @@ void _packageBatteryInfo(CFDictionaryRef *ret)
             return;
         
         // Does the battery provide its own time remaining estimate?
-        if (_shouldTrustBatteryTimeEstimate(b)) {
-            CFDictionarySetValue(mutDict, CFSTR("Battery Provides Time Remaining"), kCFBooleanTrue);
-        }
+        CFDictionarySetValue(mutDict, CFSTR("Battery Provides Time Remaining"), kCFBooleanTrue);
 
         // Are we in a time remaining black-out period due to a recent discontinuity?
         if (_ignoringTimeRemainingEstimates) {
@@ -936,38 +925,64 @@ void _packageBatteryInfo(CFDictionaryRef *ret)
 
 // _readAndPublicACAdapter
 // These keys describe the bit-layout of the 64-bit AC info structure.
-/*
-#define kACCRCBit       0   // size 8
-#define kACIDBit        8   // size 12
-#define kACPowerBit     20  // size 8
-#define kACRevisionBit  28  // size 4
-#define kACSerialBit    32  // size 24
-#define kACFamilyBit    56  // size 8
-*/
-#define kACCRCBit       56   // size 8
-#define kACIDBit        44  // size 12
-#define kACPowerBit     36  // size 8
-#define kACRevisionBit  32  // size 4
-#define kACSerialBit    8   // size 24
-#define kACFamilyBit    0   // size 8
 
+/* Legacy format */
+
+#define kACCRCBit               56  // size 8
+#define kACIDBit                44  // size 12
+#define kACPowerBit             36  // size 8
+#define kACRevisionBit          32  // size 4
+#define kACSerialBit            8   // size 24
+#define kACFamilyBit            0   // size 8
+
+/* New format (intro'd in Jan 2012) */
+
+//#define kACCRCBit             56   // 8 bits, same as in legacy
+#define kACCurrentIdBit         48   // 8 bits
+//#define kACCommEnableBit      45   // 1 bit; doesn't contain meaningful information
+#define kACSourceIdBit          44   // 3 bits
+//#define kACPowerBit           36   // 8 bits, same as in legacy
+#define kACVoltageIDBit         33   // 3 bits
+//#define kACSerialBit          8    // 25 bits
+//#define kACFamilyBit          0    // 8 bits, same as in legacy
+
+#define k3BitMask       0x7
+
+
+typedef struct {
+    uint32_t        valCommEn;
+    uint32_t        valVoltageID;
+    uint32_t        valID;
+    uint32_t        valPower;
+    uint32_t        valRevision;
+    uint32_t        valSerial;
+    uint32_t        valFamily;
+    uint32_t        valCurrent;
+    uint32_t        valSource;
+} AdapterAttributes;
+
+static void stuffInt32(CFMutableDictionaryRef d, CFStringRef k, uint32_t n)
+{
+    CFNumberRef stuffNum = NULL;
+    if ((stuffNum = CFNumberCreate(0, kCFNumberSInt32Type, &n))) 
+    {
+        CFDictionarySetValue(d, k, stuffNum);
+        CFRelease(stuffNum);
+    }
+}
 
 static IOReturn _readAndPublishACAdapter(bool adapterExists, CFDictionaryRef batteryACDict)
 {
-    CFStringRef                 key = NULL;
-    CFMutableDictionaryRef      acDict = NULL;
-    CFNumberRef     stuffNum = NULL;
-//    uint32_t        valCRC = 0;
-    uint32_t        valID = 0;
-    uint32_t        valPower = 0;
-    uint32_t        valRevision = 0;
-    uint32_t        valSerial = 0;
-    uint32_t        valFamily = 0;
-    uint64_t        acBits = 0;
-    IOReturn        ret = kIOReturnSuccess;
-    Boolean         success = FALSE;
-    static bool     adapterInfoPublished = false;
-    static CFDictionaryRef  oldACDict = NULL;
+    static bool                     adapterInfoPublished = false;
+    static CFDictionaryRef          oldACDict = NULL;
+    CFStringRef                     key = NULL;
+    CFMutableDictionaryRef          acDict = NULL;
+    IOReturn                        ret = kIOReturnSuccess;
+    Boolean                         success = FALSE;
+    int                             j = 0;
+    AdapterAttributes               info;
+    
+    bzero(&info, sizeof(info));
 
     // Make sure we re-read the adapter on wake from sleep
     if (_readACAdapterAgain) {
@@ -976,29 +991,41 @@ static IOReturn _readAndPublishACAdapter(bool adapterExists, CFDictionaryRef bat
     }
 
     // Always republish AC info if it comes from the battery
-    if (adapterExists && batteryACDict && oldACDict && !CFEqual(oldACDict, batteryACDict)) {
-	adapterInfoPublished = false;
+    if (adapterExists && batteryACDict && oldACDict && !CFEqual(oldACDict, batteryACDict)) 
+    {
+        adapterInfoPublished = false;
     }
 
     // don't re-publish AC info until the adapter changes
-    if (adapterExists && adapterInfoPublished) {
+    if (adapterExists && adapterInfoPublished) 
+    {
         return kIOReturnSuccess;
     }
 
     if (adapterExists && !batteryACDict)
     {
+        uint64_t acBits;
+        
         ret = _getACAdapterInfo(&acBits);
         if (kIOReturnSuccess != ret) {
             return ret;
         }
         
         // Decode SMC key
-        valFamily = (acBits >> kACFamilyBit) & 0xFF;
-        valSerial = (acBits >> kACSerialBit) & 0xFFFFFF;
-        valRevision = (acBits >> kACRevisionBit) & 0xF;
-        valPower = (acBits >> kACPowerBit) & 0xFF;
-        valID = (acBits >> kACIDBit) & 0xFFF;
-//        valCRC = (acBits >> kACCRCBit) & 0xFF;
+        info.valID              = (acBits >> kACIDBit) & 0xFFF;
+        info.valFamily          = (acBits >> kACFamilyBit) & 0xFF;
+        info.valPower           = (acBits >> kACPowerBit) & 0xFF;
+        if ( (info.valSource    = (acBits >> kACSourceIdBit) & k3BitMask))
+        {
+            // New format
+            info.valSerial      = (acBits >> kACSerialBit) & 0x1FFFFFF;
+            info.valCurrent     = ((acBits >> kACCurrentIdBit) & 0xFF) * 25;
+            info.valVoltageID   = (acBits >> kACVoltageIDBit) & k3BitMask;
+        } else {
+            // Legacy format
+            info.valSerial      = (acBits >> kACSerialBit) & 0xFFFFFF;
+            info.valRevision    = (acBits >> kACRevisionBit) & 0xF;
+        }
         
         // Publish values in dictionary
         acDict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
@@ -1009,33 +1036,26 @@ static IOReturn _readAndPublishACAdapter(bool adapterExists, CFDictionaryRef bat
             goto exit;
         }
         
-        stuffNum = CFNumberCreate(0, kCFNumberSInt32Type, &valSerial);
-        if (stuffNum) {
-            CFDictionarySetValue(acDict, CFSTR(kIOPSPowerAdapterSerialNumberKey), stuffNum);
-            CFRelease(stuffNum);
+        if (info.valSource) {
+            // New format
+            stuffInt32(acDict, CFSTR(kIOPSPowerAdapterCurrentKey), info.valCurrent);
+            stuffInt32(acDict, CFSTR(kIOPSPowerAdapterSourceKey), info.valSource);
+
         }
-        stuffNum = CFNumberCreate(0, kCFNumberSInt32Type, &valFamily);
-        if (stuffNum) {
-            CFDictionarySetValue(acDict, CFSTR(kIOPSPowerAdapterFamilyKey), stuffNum);
-            CFRelease(stuffNum);
+        else {
+            // Legacy format
+            stuffInt32(acDict, CFSTR(kIOPSPowerAdapterRevisionKey), info.valRevision);
         }
-        stuffNum = CFNumberCreate(0, kCFNumberSInt32Type, &valRevision);
-        if (stuffNum) {
-            CFDictionarySetValue(acDict, CFSTR(kIOPSPowerAdapterRevisionKey), stuffNum);
-            CFRelease(stuffNum);
+
+        if (0 != info.valPower) {
+            stuffInt32(acDict, CFSTR(kIOPSPowerAdapterWattsKey), info.valPower);
         }
-        stuffNum = CFNumberCreate(0, kCFNumberSInt32Type, &valPower);
-        if (stuffNum) {
-            CFDictionarySetValue(acDict, CFSTR(kIOPSPowerAdapterWattsKey), stuffNum);
-            CFRelease(stuffNum);
-        }
-        stuffNum = CFNumberCreate(0, kCFNumberSInt32Type, &valID);
-        if (stuffNum) {
-            CFDictionarySetValue(acDict, CFSTR(kIOPSPowerAdapterIDKey), stuffNum);
-            CFRelease(stuffNum);
-        }
-        
-	batteryACDict = acDict;
+
+        stuffInt32(acDict, CFSTR(kIOPSPowerAdapterIDKey), info.valID);
+        stuffInt32(acDict, CFSTR(kIOPSPowerAdapterSerialNumberKey), info.valSerial);
+        stuffInt32(acDict, CFSTR(kIOPSPowerAdapterFamilyKey), info.valFamily);
+
+        batteryACDict = acDict;
     }
 
     // Write dictionary into dynamic store
@@ -1087,12 +1107,12 @@ exit:
 
 
 /***********************************************************************************/
-/* newKeyForType
+/* copyNewKeyForType
  * Assigns a unique string as the key for the power source type.
  * The name should reflect the power source's type, and should have a unique
  * integer appended to unique it within the system.
  */
-static CFStringRef _newKeyForType(char *type)
+static CFStringRef _copyNewKeyForType(char *type)
 {
     CFStringRef         scKey = NULL;
     CFStringRef         typeString = NULL;
@@ -1236,7 +1256,7 @@ kern_return_t _io_pm_new_pspowersource(
                 MACH_MSG_TYPE_MAKE_SEND_ONCE,               // notifyPoly
                 &oldNotify);                                // previous
   
-    new_tracker->scdsKey = _newKeyForType(clienttype);
+    new_tracker->scdsKey = _copyNewKeyForType(clienttype);
     
     if (new_tracker->scdsKey) 
     {
@@ -1269,13 +1289,14 @@ kern_return_t _io_pm_update_pspowersource(
     if (!dskeyCFSTR)
         goto exit;
 
-    details = isA_CFDictionary(IOCFUnserialize((const char *)details_ptr, NULL, 0, NULL));
+    details = IOCFUnserialize((const char *)details_ptr, NULL, 0, NULL);
     if (!details)
         goto exit;
-
-    PMStoreSetValue(dskeyCFSTR, details);
     
-    *return_code = kIOReturnSuccess;
+    if (isA_CFDictionary(details)) {
+        PMStoreSetValue(dskeyCFSTR, details);    
+        *return_code = kIOReturnSuccess;
+    }
 exit:
     if (dskeyCFSTR)
         CFRelease(dskeyCFSTR);

@@ -42,25 +42,22 @@
 int main()
 {    
     IOReturn                ret = kIOReturnSuccess; 
-    IOPMAssertionID         assertion_id = 0;
+    IOPMAssertionID         assertion_id[DO_ITERATIONS] = {kIOPMNullAssertionID};
     int                     didIterations = 0;
     int                     didFork = 0;
+
 
     int i=0;
     int failureLine = 0;
 
-    PMTestInitialize("assertion_settimeout: stressing assertion create, release, and timeouts", "com.apple.iokit.powermanagement");
+    PMTestInitialize("AssertOneWithTimeout: Create an assertion, set a timeout, let it expire. Wait 10 seconds.", "com.apple.iokit.powermanagement");
     PMTestLog("Performing %d assert, settimeout, release cycles.", DO_ITERATIONS);
 
     for (i=0; i<DO_ITERATIONS; i++)
     {
-        if (0 != fork()) {
-            continue;
-        }
-
         ret = IOPMAssertionCreate(  kIOPMAssertionTypeNoDisplaySleep, 
                                     kIOPMAssertionLevelOn, 
-                                    &assertion_id);
+                                    &assertion_id[i]);
 
         if(kIOReturnSuccess != ret) {
             PMTestFail("Error 0x%08x from IOPMAssertionCreate()\n", ret);
@@ -68,7 +65,7 @@ int main()
             break;
         }
 
-        ret = IOPMAssertionSetTimeout(assertion_id, 1.0);
+        ret = IOPMAssertionSetTimeout(assertion_id[i], 5.0);
 
         if(kIOReturnSuccess != ret) {
             PMTestFail("Error 0x%08x from IOPMAssertionSetTimeout()\n", ret);
@@ -76,10 +73,19 @@ int main()
             break;
         }
         
-        printf("Forked child exiting without releasing assertion. (%d)\n", didFork);
+    }
+    
+    sleep(10);
 
-        // The forked child exits suddenly, forcing configd to clean up the dangling timer & assertion.
-        exit(0);
+    /* 
+     * 
+     * WAIT FOR ASSERTIONS TO TIMEOUT 
+     *
+     */
+
+    for (i=0; i<DO_ITERATIONS; i++)
+    {
+        IOPMAssertionRelease(assertion_id[i]);
     }
 
     didIterations = i;

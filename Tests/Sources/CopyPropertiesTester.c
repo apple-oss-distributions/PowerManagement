@@ -44,55 +44,62 @@
 int main()
 {
     IOReturn            ret = 0;
-    IOPMAssertionID     _id = 0;
-    CFDictionaryRef     _props = 0;
-    CFStringRef         keys[10];
-    CFTypeRef           vals[10];
-    int                 val = 0;
+    IOPMAssertionID     _id[10];
     
-    ret = PMTestInitialize("PMAssertions", "com.apple.iokit.powertesting");
+    ret = PMTestInitialize("CopyPropertiesExerciser", "com.apple.iokit.powertesting");
     if(kIOReturnSuccess != ret)
     {
         fprintf(stderr,"PMTestInitialize failed with IOReturn error code 0x%08x\n", ret);
         exit(-1);
     }
     
+    int i;
     
-    keys[0] =       kIOPMAssertionTypeKey;
-    vals[0] =       kIOPMAssertionTypePreventUserIdleSystemSleep;
+    for (i=0; i<10; i++)
+    {       
+        ret = IOPMAssertionCreate(kIOPMAssertionTypePreventUserIdleSystemSleep, kIOPMAssertionLevelOn, &_id[i]);
     
-    keys[1] =       kIOPMAssertionHumanReadableReasonKey;
-    vals[1] =       CFSTR("I did this because I had to.");
-    
-    val =           500; // seconds
-    keys[2] =       kIOPMAssertionTimeoutKey;
-    vals[2] =       CFNumberCreate(0, kCFNumberIntType, &val);
-    
-    keys[3] =       kIOPMAssertionLocalizationBundlePathKey;
-    vals[3] =       CFSTR("/System/Library/CoreServices/powerd.bundle");
-    
-    _props = CFDictionaryCreate(0, (const void **)keys, (const void **)vals, 4, 
-                                &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    
-    ret = IOPMAssertionCreateWithProperties(_props, &_id);
-    
-    CFRelease(_props);
-    CFRelease(vals[0]);
-    CFRelease(vals[2]);
-
-    if (kIOReturnSuccess != ret) {
-        PMTestFail("IOPMAssertionCreateWithProperties returns non-success 0x%08x\n", ret);
-        exit(1);
-    }
-
-    ret = IOPMAssertionRelease(_id);
-    
-    if (kIOReturnSuccess != ret) {
-        PMTestFail("IOPMAssertionRelease returns non-success 0x%08x\n", ret);
-        exit(1);
+        if (kIOReturnSuccess != ret) {
+            PMTestFail("IOPMAssertionCreateWithProperties returns non-success 0x%08x\n", ret);
+            exit(1);
+        }
     }
     
-    PMTestPass("Successfully created and released via IOPMAssertionCrateWithProperties\n");
+    CFDictionaryRef     properties = NULL;
+    for (i=0; i<10; i++)
+    {
+        properties = IOPMAssertionCopyProperties(_id[i]);
+        
+        
+        /* Pure sanity check. */
+        
+        if (!properties) {
+            PMTestFail("IOPMAssertionCopyProperties for id %ld return NULL\n", _id[i]);
+            exit(1);
+        }
+        
+        if (!CFDictionaryContainsKey(properties, kIOPMAssertionNameKey)
+            || !CFDictionaryContainsKey(properties, kIOPMAssertionTypeKey)
+            || !CFDictionaryContainsKey(properties, kIOPMAssertionLevelKey))
+        {
+            CFShow(properties);
+            PMTestFail("IOPMAssertionCopyProperties doesn't contain required dictionary keys\n", _id[i]);
+        }
+
+        CFRelease(properties);
+    }
+
+    for (i=0; i<10; i++)
+    {       
+        ret = IOPMAssertionRelease(_id[i]);
+    
+        if (kIOReturnSuccess != ret) {
+            PMTestFail("IOPMAssertionRelease returns non-success 0x%08x\n", ret);
+            exit(1);
+        }
+    }
+    
+    PMTestPass("Created a handful of assertions. Every one of them had properties.\n");
     
     return 0;
 }

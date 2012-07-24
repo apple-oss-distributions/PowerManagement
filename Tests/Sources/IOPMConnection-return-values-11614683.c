@@ -22,8 +22,7 @@
  */
 /*
  *
-These tests elicit crashes in PM configd plugin as seen in:
-    <rdar://problem/6765534> STOMPER? 10A322: configd crash (loss of external DNS resolution on 10A322-10A343)
+<rdar://problem/11614683> CrashTracer: 99 crashes in SleepServicesD at SleepServicesD: -[PowerStateTracker init]
  *
  */
 
@@ -41,15 +40,7 @@ These tests elicit crashes in PM configd plugin as seen in:
 #endif
 #include "PMTestLib.h"
 
-#define	MAXPASS			    50
-#define	MAXPASS_FORK		50
-#define	MAXPASS_NOTIFY		20
-
-void check_IOPMAssertionCreate_and_Release(bool doFork, int *didTests);
-
-#ifndef TARGET_OS_EMBEDDED
 void check_IOPMConnectionCreate_and_Release(bool doFork, int *didTests);
-#endif
 
 #define kMainDoLoops    5
 
@@ -58,92 +49,25 @@ int main(int argc, char **argv)
 {
     int i = 0;
     int didTests = 0;
+	int doLoops = kMainDoLoops;
+	
+	if (argc>1) {
+		doLoops = strtol(argv[1], NULL, 10);
+	}
 
-    PMTestInitialize("Assertions crash configd - 6765534", "com.apple.iokit.powermanagement.assertions_stress");
+    PMTestInitialize("IOPMConnection shouldn't return errors", "com.apple.iokit.powermanagement.iopmconnectionschedule");
 
-    while (i++ < kMainDoLoops)
+    while (i++ < doLoops)
     {
-#ifndef TARGET_OS_EMBEDDED
         PMTestLog("MainLoop=%d Executing check_IOPMConnectionCreate_and_Release", i);
         check_IOPMConnectionCreate_and_Release(FALSE, &didTests);
         PMTestPass("IOPMConnection create and release loops SUCCESS: did %d", didTests);
-#endif
-        PMTestLog("MainLoop=%d Executing check_IOPMAssertionCreate_and_Release", i);
-        check_IOPMAssertionCreate_and_Release(FALSE, &didTests);
-        PMTestPass("IOPMConnection Assertion create and release loops SUCCESS: did %d", didTests);
-
-        PMTestLog("MainLoop=%d Executing check_IOPMAssertionCreate_and_Release with child deaths", i);
-        check_IOPMAssertionCreate_and_Release(TRUE, &didTests);
-        PMTestPass("IOPMConnection Assertion create and child death SUCCESS: did %d", didTests);
     }
+
 }
 
 
-void check_IOPMAssertionCreate_and_Release(bool doFork, int *didTests)
-{
-	int		i;
-	int		n	= doFork ? MAXPASS_FORK : MAXPASS;
-	IOReturn	ret;
 
-	for (i = 0; i < n; i++) {
-		IOPMAssertionID	assertion_id;
-		pid_t		pid;
-		int		status;
-
-//        printf("Assertion %d of %d, %s", i, n, doFork?"fork":"no fork");
-		pid = doFork ? fork() : 0;
-		switch (pid) {
-		    case -1 :
-			perror("fork()");
-			exit(1);
-			// not reached
-		    case  0 :
-			ret = IOPMAssertionCreateWithName(kIOPMCPUBoundAssertion,
-						  kIOPMAssertionLevelOn,
-                          CFSTR("com.apple.iokit.powermanagement.assertions_stress"),
-						  &assertion_id);
-			if (ret != kIOReturnSuccess) {
-				PMTestFail("IOPMAssertionCreate() failed, error = 0x%08x", ret);
-				exit(1);
-			}
-			
-			// Set a timeout on every even numbered assertion
-			if (0 == i%2) {
-			    ret = IOPMAssertionSetTimeout(assertion_id, (CFTimeInterval)30.0);
-                if (ret != kIOReturnSuccess) {
-                    PMTestFail("IOPMAssertionSetTimeout() failed 0x%08x", ret);
-                    exit(1);
-                }
-			}
-
-			// if doFork, let app exit release the assertion
-			if (doFork) _exit(0);
-
-			// explicitly release the assertion
-			ret = IOPMAssertionRelease(assertion_id);
-			if (ret != kIOReturnSuccess) {
-				PMTestFail("IOPMAssertionRelease() failed 0x%08x", ret);
-				exit(1);
-			}
-
-			break;
-		    default :
-			pid = wait4(pid, &status, 0, NULL);
-			if ((pid == -1) ||
-			    !WIFEXITED(status) ||
-			    (WEXITSTATUS(status) != 0)) {
-				PMTestFail("child process did not exit cleanly");
-				exit(1);
-			}
-		}
-	}
-
-    *didTests = i;
-
-	return;
-}
-
-#ifndef TARGET_OS_EMBEDDED
 void myDummyPMConnectionHandler(
     void *param, 
     IOPMConnection connection, 
@@ -154,6 +78,11 @@ void myDummyPMConnectionHandler(
                 (int)(uintptr_t)param, eventDescriptor);
     return;
 }
+
+#define	MAXPASS			    50
+#define	MAXPASS_FORK		50
+#define	MAXPASS_NOTIFY		20
+
 
 void
 check_IOPMConnectionCreate_and_Release(bool doFork, int *didTests)
@@ -178,7 +107,7 @@ check_IOPMConnectionCreate_and_Release(bool doFork, int *didTests)
 		    case  0 :
                 ret = IOPMConnectionCreate(CFSTR("I am so forked"),
                               kIOPMSystemPowerStateCapabilityDisk | kIOPMSystemPowerStateCapabilityNetwork
-                             | kIOPMSystemPowerStateCapabilityCPU,
+                             | kIOPMSystemPowerStateCapabilityAudio | kIOPMSystemPowerStateCapabilityVideo);
                               &connect);
                 if (ret != kIOReturnSuccess) {
                     PMTestFail("IOPMConnectionCreate() failed, error = 0x%08x", ret);
@@ -223,5 +152,3 @@ check_IOPMConnectionCreate_and_Release(bool doFork, int *didTests)
 
 	return;
 }
-#endif
-

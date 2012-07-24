@@ -40,59 +40,48 @@
  *
  */
 
+#define kRunTestCount       1000
 
 int main()
 {
+    int                 i;
     IOReturn            ret = 0;
     IOPMAssertionID     _id = 0;
-    CFDictionaryRef     _props = 0;
-    CFStringRef         keys[10];
-    CFTypeRef           vals[10];
-    int                 val = 0;
     
-    ret = PMTestInitialize("PMAssertions", "com.apple.iokit.powertesting");
+    ret = PMTestInitialize("PMAssertions Create & Release Benchmark", "com.apple.iokit.powertesting");
     if(kIOReturnSuccess != ret)
     {
         fprintf(stderr,"PMTestInitialize failed with IOReturn error code 0x%08x\n", ret);
         exit(-1);
     }
     
-    
-    keys[0] =       kIOPMAssertionTypeKey;
-    vals[0] =       kIOPMAssertionTypePreventUserIdleSystemSleep;
-    
-    keys[1] =       kIOPMAssertionHumanReadableReasonKey;
-    vals[1] =       CFSTR("I did this because I had to.");
-    
-    val =           500; // seconds
-    keys[2] =       kIOPMAssertionTimeoutKey;
-    vals[2] =       CFNumberCreate(0, kCFNumberIntType, &val);
-    
-    keys[3] =       kIOPMAssertionLocalizationBundlePathKey;
-    vals[3] =       CFSTR("/System/Library/CoreServices/powerd.bundle");
-    
-    _props = CFDictionaryCreate(0, (const void **)keys, (const void **)vals, 4, 
-                                &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    
-    ret = IOPMAssertionCreateWithProperties(_props, &_id);
-    
-    CFRelease(_props);
-    CFRelease(vals[0]);
-    CFRelease(vals[2]);
+    PMTestLog("This test creates, then immediately releases one assertion at a time, \nover %d iterations.\n", kRunTestCount);
+    PMTestLog("This test is meant to be timed as a loose guide to assertion performance.");
 
-    if (kIOReturnSuccess != ret) {
-        PMTestFail("IOPMAssertionCreateWithProperties returns non-success 0x%08x\n", ret);
-        exit(1);
-    }
+    for (i=0; i<kRunTestCount; i++)
+    {    
+        ret = IOPMAssertionCreateWithDescription(
+                        kIOPMAssertionTypePreventUserIdleSystemSleep,
+                        CFSTR("PreventUserIdleSystemSleep Assertion For Performance Test"),
+    			        CFSTR("com.apple.iokit.assertions"),
+    			        CFSTR("com.apple.humanreadable"),
+    			        NULL,
+    			        30.0,
+    			        NULL,
+    			        &_id);
+    
+        if (kIOReturnSuccess != ret) {
+            PMTestFail("IOPMAssertionCreateWithProperties returns non-success 0x%08x\n", ret);
+        }
 
-    ret = IOPMAssertionRelease(_id);
+        ret = IOPMAssertionRelease(_id);
     
-    if (kIOReturnSuccess != ret) {
-        PMTestFail("IOPMAssertionRelease returns non-success 0x%08x\n", ret);
-        exit(1);
-    }
-    
-    PMTestPass("Successfully created and released via IOPMAssertionCrateWithProperties\n");
+        if (kIOReturnSuccess != ret) {
+            PMTestFail("IOPMAssertionRelease returns non-success 0x%08x\n", ret);
+        }
+    }   
+     
+    PMTestPass("Successfully created and released (%d)\n", kRunTestCount);
     
     return 0;
 }

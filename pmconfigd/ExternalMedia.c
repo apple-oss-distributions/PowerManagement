@@ -97,8 +97,8 @@ static void _DiskAppeared(DADiskRef disk, void * context)
 
 static bool weLikeTheDisk(DADiskRef disk)
 {
-    CFDictionaryRef		description = NULL;
-    CFStringRef			protocol = NULL;
+    CFDictionaryRef     description = NULL;
+    CFStringRef         protocol = NULL;
     bool                ret = false;
 
     /*
@@ -107,6 +107,7 @@ static bool weLikeTheDisk(DADiskRef disk)
       USB hard drive    : Protocol = USB
       USB thumb drive   : Protocol = USB 
       SD Card           : Protocol = USB, Protocol = Secure Digital 
+      External drive    : Interconnect Location = External
 
     These disks do not cause us to create an ExternalMedia assertion;
       CD/DVD            : Protocol = ATAPI
@@ -115,73 +116,26 @@ static bool weLikeTheDisk(DADiskRef disk)
     
     description = DADiskCopyDescription(disk);
     if (description) {
-
-        protocol = CFDictionaryGetValue(description, kDADiskDescriptionDeviceProtocolKey);
-
-        if (protocol &&
-            (CFEqual(protocol, CFSTR(kIOPropertyPhysicalInterconnectTypeUSB)) ||
-             CFEqual(protocol, CFSTR(kIOPropertyPhysicalInterconnectTypeSecureDigital))))
-        {
-            ret = true;
-        }
         
+        if (CFDictionaryGetValue(description, kDADiskDescriptionDeviceInternalKey) == kCFBooleanFalse) {
+            ret = true;
+        } else {
+            protocol = CFDictionaryGetValue(description, kDADiskDescriptionDeviceProtocolKey);
+
+            if (protocol &&
+                (CFEqual(protocol, CFSTR(kIOPropertyPhysicalInterconnectTypeUSB)) ||
+                 CFEqual(protocol, CFSTR(kIOPropertyPhysicalInterconnectTypeSecureDigital))))
+            {
+                ret = true;
+            }
+        }
+
         CFRelease(description);
     }
     return ret;
 }
 
 /*****************************************************************************/
-
-static CFMutableDictionaryRef	_IOPMAssertionDescriptionCreate(
-    CFStringRef AssertionType, 
-    CFStringRef Name, 
-    CFStringRef Details,
-    CFStringRef HumanReadableReason,
-    CFStringRef LocalizationBundlePath,
-    CFTimeInterval Timeout,
-    CFStringRef TimeoutBehavior)
-{
-    CFMutableDictionaryRef  descriptor = NULL;
-    
-    if (!AssertionType || !Name) {
-        return NULL;
-    }
-    
-    descriptor = CFDictionaryCreateMutable(0, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    if (!descriptor) {
-        return NULL;
-    }
-
-    CFDictionarySetValue(descriptor, kIOPMAssertionNameKey, Name);
-
-    int _on = kIOPMAssertionLevelOn;
-    CFNumberRef _on_num = CFNumberCreate(0, kCFNumberIntType, &_on);
-    CFDictionarySetValue(descriptor, kIOPMAssertionLevelKey, _on_num);
-    CFRelease(_on_num);
-
-    CFDictionarySetValue(descriptor, kIOPMAssertionTypeKey, AssertionType);
-
-    if (Details) {
-        CFDictionarySetValue(descriptor, kIOPMAssertionDetailsKey, Details);
-    }
-    if (HumanReadableReason) {
-        CFDictionarySetValue(descriptor, kIOPMAssertionHumanReadableReasonKey, HumanReadableReason);
-    }
-    if (LocalizationBundlePath) {
-        CFDictionarySetValue(descriptor, kIOPMAssertionLocalizationBundlePathKey, LocalizationBundlePath);
-    }
-    if (Timeout) {
-        CFNumberRef Timeout_num = CFNumberCreate(0, kCFNumberDoubleType, &Timeout);
-        CFDictionarySetValue(descriptor, kIOPMAssertionTimeoutKey, Timeout_num);
-        CFRelease(Timeout_num);
-    }
-    if (TimeoutBehavior)
-    {
-        CFDictionarySetValue(descriptor, kIOPMAssertionTimeoutActionKey, TimeoutBehavior);
-    }
-
-    return descriptor;
-}
 
 
 static void adjustExternalDiskAssertion()

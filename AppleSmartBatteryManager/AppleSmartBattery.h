@@ -52,6 +52,7 @@ protected:
     uint32_t                    fPollingInterval;
     bool                        fPollingOverridden;
     bool                        fRebootPolling;
+    uint8_t                     fReadingExtendedCmd;
     bool                        fInflowDisabled;
     bool                        fChargeInhibited;
     uint16_t                    fRemainingCapacity;

@@ -123,7 +123,7 @@ PMSystemEventsRootDomainInterest(void)
     {
         CFStringRef writeToKey = createSCKeyForIOKitString(keys[i]);
         if (writeToKey) {
-            CFDictionarySetValue(setTheseDSKeys, writeToKey, keys[i]);
+            CFDictionarySetValue(setTheseDSKeys, writeToKey, vals[i]);
             CFRelease(writeToKey);
         }
     }
@@ -156,4 +156,4 @@ exit:
 }
 
 
-#endif _PMSystemEvents_h_
+#endif //_PMSystemEvents_h_

@@ -45,10 +45,6 @@ int main()
 {
     IOReturn            ret = 0;
     IOPMAssertionID     _id = 0;
-    CFDictionaryRef     _props = 0;
-    CFStringRef         keys[10];
-    CFTypeRef           vals[10];
-    int                 val = 0;
     
     ret = PMTestInitialize("PMAssertions", "com.apple.iokit.powertesting");
     if(kIOReturnSuccess != ret)
@@ -58,28 +54,9 @@ int main()
     }
     
     
-    keys[0] =       kIOPMAssertionTypeKey;
-    vals[0] =       kIOPMAssertionTypePreventUserIdleSystemSleep;
+    ret = IOPMAssertionCreate(kIOPMAssertionTypePreventUserIdleSystemSleep,
+			      kIOPMAssertionLevelOn, &_id);
     
-    keys[1] =       kIOPMAssertionHumanReadableReasonKey;
-    vals[1] =       CFSTR("I did this because I had to.");
-    
-    val =           500; // seconds
-    keys[2] =       kIOPMAssertionTimeoutKey;
-    vals[2] =       CFNumberCreate(0, kCFNumberIntType, &val);
-    
-    keys[3] =       kIOPMAssertionLocalizationBundlePathKey;
-    vals[3] =       CFSTR("/System/Library/CoreServices/powerd.bundle");
-    
-    _props = CFDictionaryCreate(0, (const void **)keys, (const void **)vals, 4, 
-                                &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    
-    ret = IOPMAssertionCreateWithProperties(_props, &_id);
-    
-    CFRelease(_props);
-    CFRelease(vals[0]);
-    CFRelease(vals[2]);
-
     if (kIOReturnSuccess != ret) {
         PMTestFail("IOPMAssertionCreateWithProperties returns non-success 0x%08x\n", ret);
         exit(1);
