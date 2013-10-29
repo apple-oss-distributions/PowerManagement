@@ -50,7 +50,6 @@ enum {
     kIOPMRemoveUnsupportedSettings = true
 };
 
-
 /* Global - energySettings
  * Keeps track of current Energy Saver settings.
  */
@@ -74,8 +73,6 @@ static io_connect_t                     gPowerManager;
 static unsigned long                    deferredPSChangeNotify = 0;
 static unsigned long                    _pmcfgd_impendingSleep = 0;
 
-/* Tracking SilentRunning Capability */
-static int              gSilentRunningOverride = kPMSROverrideNotSet;
 
 /* Forward Declarations */
 static CFDictionaryRef _copyPMSettings(bool removeUnsupported);
@@ -113,13 +110,6 @@ GetPMSettingBool(CFStringRef which)
     if (!energySettings || !which) 
         return false;
 
-    if (CFEqual(which, CFSTR(kIOPMDarkWakeBackgroundTaskKey))) {
-        /* Overrides for DWBT support */
-        if (gSilentRunningOverride == kPMSROverrideEnable)
-            return true;
-        if (gSilentRunningOverride == kPMSROverrideDisable)
-            return false;
-    }
     
     if (_getPowerSource() == kBatteryPowered)
        pwrSrc = CFSTR(kIOPMBatteryPowerKey);
@@ -143,6 +133,36 @@ GetPMSettingBool(CFStringRef which)
 
 
 
+__private_extern__ IOReturn
+GetPMSettingNumber(CFStringRef which, int64_t *value)
+{
+    CFDictionaryRef     current_settings; 
+    CFNumberRef         n;
+    CFStringRef         pwrSrc;
+    
+    if (!energySettings || !which) 
+        return kIOReturnBadArgument;
+
+    if (_getPowerSource() == kBatteryPowered)
+       pwrSrc = CFSTR(kIOPMBatteryPowerKey);
+    else
+       pwrSrc = CFSTR(kIOPMACPowerKey);
+    // Don't use 'currentPowerSource' here as that gets updated
+    // little slowly after this function is called to get a setting
+    // on new power source.
+    current_settings = (CFDictionaryRef)isA_CFDictionary(
+                         CFDictionaryGetValue(energySettings, pwrSrc));
+
+    if (current_settings) {
+        n = CFDictionaryGetValue(current_settings, which);
+        if (isA_CFNumber(n)) {
+            CFNumberGetValue(n, kCFNumberSInt64Type, value);
+            return kIOReturnSuccess;
+        }
+    }
+    return kIOReturnError;
+}
+
 /* Returns Display sleep time in minutes */
 __private_extern__ IOReturn
 getDisplaySleepTimer(uint32_t *displaySleepTimer)
@@ -156,6 +176,30 @@ getDisplaySleepTimer(uint32_t *displaySleepTimer)
                             CFDictionaryGetValue(energySettings, currentPowerSource));
     if (getAggressivenessValue(current_settings, CFSTR(kIOPMDisplaySleepKey), 
                                     kCFNumberSInt32Type, displaySleepTimer) ) {
+        return kIOReturnSuccess;
+    }
+
+    return kIOReturnError;
+}
+
+/* Returns Idle sleep time in minutes */
+__private_extern__ IOReturn
+getIdleSleepTimer(uint32_t *idleSleepTimer)
+{
+    CFDictionaryRef     current_settings; 
+
+    if (!energySettings || !idleSleepTimer) 
+        return kIOReturnError;
+
+    if (gSleepSetting != -1) {
+        *idleSleepTimer = gSleepSetting;
+        return kIOReturnSuccess;
+    }
+
+    current_settings = (CFDictionaryRef)isA_CFDictionary(
+                            CFDictionaryGetValue(energySettings, currentPowerSource));
+    if (getAggressivenessValue(current_settings, CFSTR(kIOPMSystemSleepKey), 
+                                    kCFNumberSInt32Type, idleSleepTimer) ) {
         return kIOReturnSuccess;
     }
 
@@ -254,20 +298,32 @@ PMSettings_CopyActivePMSettings(void)
     return return_val;
 }
 
-__private_extern__ int _get_SR_Override()
+
+/* _DWBT_enabled() returns true if the system supports DWBT and if user has opted in */
+__private_extern__ bool _DWBT_enabled(void)
 {
-    return gSilentRunningOverride;
-}
-__private_extern__ void
-_Set_SR_override(int override)
-{
-    if (gSilentRunningOverride != override) 
-    {
-        gSilentRunningOverride = override;
-        configAssertionType(kBackgroundTaskIndex, false);
+   CFDictionaryRef     current_settings; 
+   CFNumberRef         n;
+   int                 nint = 0;
+
+
+   if (!energySettings) 
+       return false;
+
+    current_settings = (CFDictionaryRef)isA_CFDictionary(
+                         CFDictionaryGetValue(energySettings, CFSTR(kIOPMACPowerKey)));
+    if (current_settings) {
+        n = CFDictionaryGetValue(current_settings, CFSTR(kIOPMDarkWakeBackgroundTaskKey));
+        if (n) {
+            CFNumberGetValue(n, kCFNumberIntType, &nint);
+        }
+        return (0 != nint);
     }
+
+    return false;
 }
 
+/* _DWBT_allowed() tells if a DWBT wake can be scheduled at this moment */
 __private_extern__ bool
 _DWBT_allowed(void)
 {
@@ -308,7 +364,6 @@ _copyPMSettings(bool removeUnsupported)
         return IOPMCopyUnabridgedActivePMPreferences();
     }
 }
-
 
 /**************************************************/
 
@@ -379,6 +434,10 @@ activate_profiles(CFDictionaryRef d, CFStringRef s, bool removeUnsupported)
         if(g_overrides & kPMPreventDisplaySleep)
         {
             if(n0) CFDictionarySetValue(profiles_activated, CFSTR(kIOPMDisplaySleepKey), n0);
+        }
+        if (g_overrides & kPMPreventDiskSleep)
+        {
+            if (n0) CFDictionarySetValue(profiles_activated, CFSTR(kIOPMDiskSleepKey), n0);
         }
 
         
@@ -477,17 +536,20 @@ PMSettingsPrefsHaveChanged(void)
     // re-read preferences into memory
     if(energySettings) CFRelease(energySettings);
 
-    // energySettings is static and global. Ignore the 
-    // clang static analyzer when it says "Potential leak"
-    energySettings = isA_CFDictionary(_copyPMSettings(
-                                        kIOPMRemoveUnsupportedSettings));
+    energySettings = _copyPMSettings(kIOPMRemoveUnsupportedSettings);
 
     // push new preferences out to the kernel
-    if(energySettings) {
+    if(isA_CFDictionary(energySettings)) {
         activate_profiles(energySettings, 
                             currentPowerSource,
                             kIOPMRemoveUnsupportedSettings);
+    } else {
+        if (energySettings) {
+            CFRelease(energySettings);
+        }
+        energySettings = NULL;
     }
+    PMAssertions_SettingsHaveChanged();
     
     return;
 }

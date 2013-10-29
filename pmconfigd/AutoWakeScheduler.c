@@ -121,12 +121,8 @@ static CFComparisonResult compareEvDates(CFDictionaryRef,
                                              CFDictionaryRef, void *);
 
 void poweronScheduleCallout(CFDictionaryRef);
-void wakeScheduleCallout(CFDictionaryRef);
-
-void wakeNoScheduledEventCallout(CFDictionaryRef);
 
 void wakeTimerExpiredCallout(CFDictionaryRef);
-void poweronTimerExpiredCallout(CFDictionaryRef);
 void sleepTimerExpiredCallout(CFDictionaryRef);
 void shutdownTimerExpiredCallout(CFDictionaryRef);
 void restartTimerExpiredCallout(CFDictionaryRef);
@@ -171,7 +167,7 @@ void restartTimerExpiredCallout(CFDictionaryRef);
  *
  * The event array pointer gets modified. 
  */
-void
+static void
 removeEventsByAppName(PowerEventBehavior *behave, CFStringRef appName)
 {
     int                 count, j;
@@ -225,7 +221,6 @@ AutoWake_prime(void)
     // Initialize powerevent callouts per-behavior    
     // note: wakeorpoweronBehavior does not have callouts of its own, by design
     wakeBehavior.timerExpirationCallout     = wakeTimerExpiredCallout;
-    poweronBehavior.timerExpirationCallout  = poweronTimerExpiredCallout;
     sleepBehavior.timerExpirationCallout    = sleepTimerExpiredCallout;
     shutdownBehavior.timerExpirationCallout = shutdownTimerExpiredCallout;
     restartBehavior.timerExpirationCallout  = restartTimerExpiredCallout;
@@ -299,6 +294,24 @@ __private_extern__ void AutoWakeCapabilitiesNotification(
     }
 }
 
+__private_extern__ void AutoWakeCalendarChange(void)
+{
+    /*The time has changed, so lets assume that all of our previously scheduled 
+     * sleep & wake events are invalid.
+     */
+    PowerEventBehavior      *this_behavior;
+    int i;
+    
+    for(i=0; i<kBehaviorsCount; i++)
+    {
+        this_behavior = behaviors[i];
+        if (this_behavior
+            && !CFEqual(this_behavior->title, CFSTR(kIOPMAutoWakeOrPowerOn)))
+        {
+            schedulePowerEvent(this_behavior);
+        }
+    }
+}
 
 /*
  * Required behaviors at timer expiration:
@@ -471,11 +484,6 @@ void poweronScheduleCallout(CFDictionaryRef event)
     return;
 }
 
-void poweronTimerExpiredCallout(CFDictionaryRef event __unused)
-{
-    // Do nothing
-    return;
-}
 
 
 /*
@@ -483,6 +491,8 @@ void poweronTimerExpiredCallout(CFDictionaryRef event __unused)
  */
 #pragma mark -
 #pragma mark Wake
+
+
 
 void wakeTimerExpiredCallout(CFDictionaryRef event __unused)
 {
@@ -644,6 +654,7 @@ purgePastEvents(PowerEventBehavior  *behave)
 static void
 copyScheduledPowerChangeArrays(void)
 {
+#if !TARGET_OS_EMBEDDED
     CFArrayRef              tmp;
     SCPreferencesRef        prefs;
     PowerEventBehavior      *this_behavior;
@@ -677,6 +688,8 @@ copyScheduledPowerChangeArrays(void)
 
 
     CFRelease(prefs);
+
+#endif
 }
 
 /*
@@ -838,10 +851,8 @@ createSCSession(SCPreferencesRef *prefs, uid_t euid, int lock)
 {
     IOReturn ret = kIOReturnSuccess;
 
-#if TARGET_OS_EMBEDDED
-    *prefs = SCPreferencesCreate( 0, CFSTR("PM-configd-AutoWake"),
-                                 CFSTR(kIOPMAutoWakePrefsPath));
-#else
+#if !TARGET_OS_EMBEDDED
+
     if (euid == 0)
         *prefs = SCPreferencesCreate( 0, CFSTR("PM-configd-AutoWake"),
                                  CFSTR(kIOPMAutoWakePrefsPath));
@@ -851,7 +862,6 @@ createSCSession(SCPreferencesRef *prefs, uid_t euid, int lock)
         goto exit;
     }
 
-#endif 
     if(!(*prefs))
     {
         if(kSCStatusAccessError == SCError())
@@ -868,6 +878,7 @@ createSCSession(SCPreferencesRef *prefs, uid_t euid, int lock)
 
 
 exit:
+#endif
     return ret;
 }
 
@@ -875,10 +886,12 @@ __private_extern__ void
 destroySCSession(SCPreferencesRef prefs, int unlock)
 {
 
+#if !TARGET_OS_EMBEDDED
     if (prefs) {
         if(unlock) SCPreferencesUnlock(prefs); 
         CFRelease(prefs);
     }
+#endif
 }
 
 static void
@@ -911,6 +924,7 @@ static IOReturn
 updateToDisk(SCPreferencesRef prefs, PowerEventBehavior  *behavior, CFStringRef type)  
 {
     IOReturn ret = kIOReturnSuccess;
+#if !TARGET_OS_EMBEDDED
 
     if(!SCPreferencesSetValue(prefs, type, behavior->array)) 
     {
@@ -929,6 +943,7 @@ updateToDisk(SCPreferencesRef prefs, PowerEventBehavior  *behavior, CFStringRef 
         goto exit;
     }
 exit:
+#endif
     return ret;
 }
 

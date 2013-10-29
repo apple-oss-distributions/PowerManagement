@@ -118,18 +118,24 @@ typedef enum {
    kACPowered
 } PowerSources;
 
-
+typedef enum {
+    kIsFullWake = 0,
+    kIsDarkWake = 1,
+    kIsDarkToFullWake = 2,
+    kIsS0Sleep = 3,
+    kIsUserWake = 4 // All FullWakes that are not notification wakes
+} WakeTypeEnum;
 
 struct IOPMBattery {
     io_registry_entry_t     me;
     io_object_t             msg_port;
     CFMutableDictionaryRef  properties;
-    int                     externalConnected:1;
-    int                     externalChargeCapable:1;
-    int                     isCharging:1;
-    int                     isPresent:1;
-    int                     markedDeclining:1;
-    int                     isTimeRemainingUnknown:1;
+    uint32_t                     externalConnected:1;
+    uint32_t                     externalChargeCapable:1;
+    uint32_t                     isCharging:1;
+    uint32_t                     isPresent:1;
+    uint32_t                     markedDeclining:1;
+    uint32_t                     isTimeRemainingUnknown:1;
     uint32_t                pfStatus;
     int                     currentCap;
     int                     maxCap;
@@ -163,7 +169,7 @@ typedef struct {
     unsigned int        fMinutesToDim;
     unsigned int        fMinutesToSpin;
     unsigned int        fMinutesToSleep;
-    
+
     unsigned int        fWakeOnLAN;
     unsigned int        fWakeOnRing;
     unsigned int        fAutomaticRestart;
@@ -175,9 +181,11 @@ typedef struct {
     unsigned int        fGPU;
     unsigned int        fDeepSleepEnable;
     unsigned int        fDeepSleepDelay;
+    unsigned int        fAutoPowerOffEnable;
+    unsigned int        fAutoPowerOffDelay;
 } IOPMAggressivenessFactors;
 
-enum { 
+enum {
     kIOHibernateMinFreeSpace                            = 750*1024ULL*1024ULL  /* 750Mb */
 };
 
@@ -189,93 +197,93 @@ __private_extern__ IOReturn ActivatePMSettings(
 
 #define kPowerManagementBundlePathCString       "/System/Library/CoreServices/powerd.bundle"
 #define kPowerdBundleIdentifier                 CFSTR("com.apple.powerd")
-
 #define kPowerManagementBundlePathString        CFSTR(kPowerManagementBundlePathCString)
-
-
-/* 
- * MessageTracer Keys
- */
-#define kMsgTracerDomainKey         	        "com.apple.message.domain"
-#define kMsgTracerSignatureKey         	        "com.apple.message.signature"
-#define kMsgTracerUUIDKey            	        "com.apple.message.uuid"
-#define kMsgTracerUUID2Key            	        "com.apple.message.uuid2"
-#define kMsgTraceDelayKey                       "com.apple.message.delay"
-#define kMsgTracerValueKey            	        "com.apple.message.value"
-#define kMsgTracerValue2Key            	        "com.apple.message.value2"
-#define kMsgTracerValue3Key            	        "com.apple.message.value3"
-#define kMsgTracerResultKey                     "com.apple.message.result"
-#define kMsgTracerResultSuccess                 "Success"
-#define kMsgTracerResultFailure                 "Failure"
-#define kMsgTracerResultNoop                    "Noop"
-#define kMsgTracerValueUndefined                "undefined"
-
-/*
- * Power Management Domains
- */
-#define kMsgTracerDomainPMSleep                 "com.apple.powermanagement.Sleep"
-#define kMsgTracerDomainPMMaintenance           "com.apple.powermanagement.MaintenanceWake"
-#define kMsgTracerDomainPMWake                  "com.apple.powermanagement.Wake"
-#define kMsgTracerDomainPMDarkWake              "com.apple.powermanagement.DarkWake"
-#define kMsgTraceRDomainPMSystemPowerState      "com.apple.powermanagement.SystemPowerState"
-#define kMsgTracerDomainPMAssertions            "com.apple.powermanagement.Assertions"
-#define kMsgTracerDomainPMWakeRequests          "com.apple.powermanagement.WakeRequests"
-#define kMsgTracerDomainHibernateStatistics     "com.apple.powermanagement.HibernateStats"
-#define kMsgTracerDomainFilteredFailure         "com.apple.powermanagement.FilteredFailure"
-#define kMsgTracerDomainAppNotify               "com.apple.powermanagement.Notification"
-#define kMsgTracerDomainAppResponse             "com.apple.powermanagement.ApplicationResponse"
-#define kMsgTracerDomainAppResponseReceived     kMsgTracerDomainAppResponse ".Response"
-#define kMsgTracerDomainAppResponseCancel       kMsgTracerDomainAppResponse ".Cancelled"
-#define kMsgTracerDomainAppResponseSlow         kMsgTracerDomainAppResponse ".SlowResponse"
-#define kMsgTracerDomainAppResponseTimedOut     kMsgTracerDomainAppResponse ".Timedout"
-
-/*
- * Signatures
- */
-#define kMsgTracerSigSuccess                    kMsgTracerResultSuccess
-#define kMsgTracerSigEarlyFailure               "Early Failure"
-#define kMsgTracerSigAppsFailure                "Apps Failure"
-#define kMsgTracerSigPriorityFailure            "Priority Failure"
-#define kMsgTracerSigInterestFailure            "Interest Failure"
-#define kMsgTracerSigCapabilityFailure          "Capability Failure"
-#define kMsgTracerSigNotificationFailure        "Notification Failure"
-#define kMsgTracerSigDriversFailure             "Drivers Failure"
-#define kMsgTracerSigHibernateFailure           "Hibernate Failure"
-#define kMsgTracerSigPlatformActionFailure      "Platform Action Failure"
-#define kMsgTracerSigPlatformDriverFailure      "Platform Driver Failure"
-#define kMsgTracerSigCpusFailure                "Cpus Failure"
-#define kMsgTracerSigPlatformFailure            "Platform Failure"
-#define kMsgTracerSigLoginwindowAuthFailure     "Loginwindow Authorization Failure"
-#define kMsgTracerSigResponseTimedOut           "Timed Out"
-#define kMsgTracerSigResponseCancel             "Cancelled"
-#define kMsgTracerSigResponseSlow               "Slow Response"
-
-/*
- * SleepService Domains
- */
-#define kMsgTracerDomainSleepServiceStarted     "com.apple.sleepservices.sessionStarted"
-#define kMsgTracerDomainSleepServiceTerminated  "com.apple.sleepservices.sessionTerminated"
-#define kMsgTracerDomainSleepServiceCapApp      "com.apple.sleepservices.clientCapTimeout"
-#define kMsgTracerPrefixSleepServices           "com.apple.sleepservices."
-#define kMsgTracerPrefixPM                      "com.apple.powermanagement."
-
-/*
- * SleepService Signatures
- */
-#define kMsgTracerSigSleepServiceExitClean      "com.apple.sleepserviced.ExitCleanAssertions"
-#define kMsgTracerSigSleepServiceTimedOut       "com.apple.sleepserviced.ExitTimeOutAssertions"
-#define kMsgTracerSigSleepServiceElevatedFull   "com.apple.sleepserviced.ElevatedToFullWake"
-#define kMsgTracerSigSleepServiceElevatedDark   "com.apple.sleepserviced.ElevatedToDarkWake"
 
 /*
  * Power Management's ASL keys
  */
-#define kPMASLMessageKey                        "com.apple.powermanagement"
-#define kPMASLMessageLogValue                   "pmlog"
+#define kPMASLDomainKey         	        "com.apple.iokit.domain"
+#define kPMASLSignatureKey         	        "signature"
+#define kPMASLUUIDKey            	        "uuid"
+#define kPMASLUUID2Key            	        "uuid2"
+#define kPMASLDelayKey                      "delay"
+#define kPMASLValueKey            	        "value"
+#define kPMASLTCPKeepAlive                  "tcpkeepaliveplatform"
+#define kPMASLTCPKeepAliveExpired           "tcpkeepaliveexpired"
 
+#define kPMASLValueSupported                "supported"
+#define kPMASLValueExpired                  "expired"
+#define kPMASLValueActive                   "active"
+
+/*
+ * Power Management Domains
+ */
+#define kPMASLDomainPMStart                 "Start"
+#define kPMASLDomainPMSleep                 "Sleep"
+#define kPMASLDomainPMMaintenance           "MaintenanceWake"
+#define kPMASLDomainPMWake                  "Wake"
+#define kPMASLDomainPMDarkWake              "DarkWake"
+#define kPMASLDomainPMAssertions            "Assertions"
+#define kPMASLDomainPMWakeRequests          "WakeRequests"
+#define kPMASLDomainHibernateStatistics     "HibernateStats"
+#define kPMASLDomainFilteredFailure         "FilteredFailure"
+#define kPMASLDomainAppNotify               "Notification"
+
+#define kPMASLDomainDWTEmergency            "ThermalEvent"
+#define kPMASLDomainSleepRevert             "SleepAborted"
+
+#define kPMASLDomainSummaryPrefix           "Summary."
+    #define kPMASLDomainSummaryActive       "Summary.Active"
+    #define kPMASLDomainSummary             "Summary.Historical"
+
+#define kPMASLDomainAppResponse             "ApplicationResponse"
+    #define kPMASLDomainAppResponseReceived     "Response.Received"
+    #define kPMASLDomainAppResponseCancel       "Response.Cancelled"
+    #define kPMASLDomainAppResponseSlow         "Response.SlowResponse"
+    #define kPMASLDomainAppResponseTimedOut     "Response.Timedout"
+
+/*
+ * Signatures
+ */
+#define kPMASLSigSuccess                    "success"
+#define kPMASLSigEarlyFailure               "Early Failure"
+#define kPMASLSigAppsFailure                "Apps Failure"
+#define kPMASLSigPriorityFailure            "Priority Failure"
+#define kPMASLSigInterestFailure            "Interest Failure"
+#define kPMASLSigCapabilityFailure          "Capability Failure"
+#define kPMASLSigNotificationFailure        "Notification Failure"
+#define kPMASLSigDriversFailure             "Drivers Failure"
+#define kPMASLSigHibernateFailure           "Hibernate Failure"
+#define kPMASLSigPlatformActionFailure      "Platform Action Failure"
+#define kPMASLSigPlatformDriverFailure      "Platform Driver Failure"
+#define kPMASLSigCpusFailure                "Cpus Failure"
+#define kPMASLSigPlatformFailure            "Platform Failure"
+#define kPMASLSigLoginwindowAuthFailure     "Loginwindow Authorization Failure"
+#define kPMASLSigResponseTimedOut           "Timed Out"
+#define kPMASLSigResponseCancel             "Cancelled"
+#define kPMASLSigResponseSlow               "Slow Response"
+
+/*
+ * SleepService Domains
+ */
+#define kPMASLDomainSleepServiceStarted     "com.apple.sleepservices.sessionStarted"
+#define kPMASLDomainSleepServiceTerminated  "com.apple.sleepservices.sessionTerminated"
+#define kPMASLDomainSleepServiceCapApp      "com.apple.sleepservices.clientCapTimeout"
+#define kPMASLPrefixSleepServices           "com.apple.sleepservices."
+#define kPMASLPrefixPM                      "com.apple.powermanagement."
+
+/*
+ * SleepService Signatures
+ */
+#define kPMASLSigSleepServiceExitClean      "com.apple.sleepserviced.ExitCleanAssertions"
+#define kPMASLSigSleepServiceTimedOut       "com.apple.sleepserviced.ExitTimeOutAssertions"
+#define kPMASLSigSleepServiceElevatedFull   "com.apple.sleepserviced.ElevatedToFullWake"
+#define kPMASLSigSleepServiceElevatedDark   "com.apple.sleepserviced.ElevatedToDarkWake"
+
+#define kPMFacility                             "com.apple.iokit.power"
 #define kPMASLActionKey                         "Action"
 #define kPMASLPIDKey                            "Process"
-#define kPMASLAssertionNameKey                  "AssertionName"
+#define kPMASLAssertionNameKey                  "AssertName"
 #define kPMASLAssertionActionCreate             "Created"
 #define kPMASLAssertionActionRelease            "Released"
 #define kPMASLAssertionActionClientDeath        "ClientDied"
@@ -283,6 +291,28 @@ __private_extern__ IOReturn ActivatePMSettings(
 #define kPMASLAssertionActionSummary            "Summary"
 #define kPMASLAssertionActionTurnOff            "Turned off"
 #define kPMASLAssertionActionTurnOn             "Turned on"
+
+/***************************************************************
+ * FDR
+ * Flight Data Recorder SPI calls
+ *
+ ***************************************************************/
+
+enum {
+    kFDRInit                    = (1 << 0),
+    kFDRACChanged               = (1 << 1),
+    kFDRSleepEvent              = (1 << 2),
+    kFDRUserWakeEvent           = (1 << 3),
+    kFDRDarkWakeEvent           = (1 << 4),
+    kFDRBattEventPeriodic       = (1 << 5),
+    kFDRBattEventAsync          = (1 << 6)
+};
+
+/* recordFDREvent
+ * powerd uses this method to publish battery and system power state info
+ * to FDR.
+ */
+void recordFDREvent(int eventType, bool checkStandbyStatus, IOPMBattery **batteries);
 
 /***************************************************************
  * MT2
@@ -352,15 +382,44 @@ void mt2RecordThermalEvent(uint32_t description);
  */
 void mt2RecordAssertionEvent(assertionOps action, assertion_t *theAssertion);
 
+/*
+ * mt2RecordAppTimeouts
+ * powerd should call to report power notification acknowledgement timeouts.
+ * @arg sleepReason indicates the type of sleep, system is entering into when ack timeout occurred.
+ * @arg procName indicates the name of process which didn't respond to notification.
+ */
+void mt2RecordAppTimeouts(CFStringRef sleepReason, CFStringRef procName);
+
+
 /* mt2PublishReports
  * Debug routines. Should only be used for debugging to influence the mt2 publishing cycle.
  * Don't call these as part of a normal sleep/wake/darkwake cycle - these are special case calls.
  */
 void mt2PublishReports(void);
 
+/* mt2PublishSleepFailure
+ * powerd should call to report a sleep failure.
+ * @arg failType is the category of the failure
+ * @arg pci_string is a list of pci devices
+ */
+void mt2PublishSleepFailure(const char *failType, const char *pci_string);
+
+/* mt2PublishWakeFailure
+ * powerd should call to report a wake failure.
+ * @arg failType is the category of the failure
+ * @arg pci_string is a list of pci devices
+ */
+void mt2PublishWakeFailure(const char *failType, const char *pci_string);
+
 // kIOPMAssertionProcessNameKey - key to IOPMAssertion dictionary
 #ifndef kIOPMAssertionProcessNameKey
 #define kIOPMAssertionProcessNameKey            CFSTR("Process Name")
+#endif
+
+// Key 'kIOPMAssertionTypeKey' may show old aliases.
+// 'kIOPMAssertionTrueTypeKey' current Official name of the type for logging
+#ifndef kIOPMAssertionTrueTypeKey
+#define kIOPMAssertionTrueTypeKey               CFSTR("AssertionTrueType")
 #endif
 
 #ifndef kIOPMRootDomainWakeReasonKey
@@ -377,43 +436,39 @@ void mt2PublishReports(void);
 
 #define kAssertionHumanReadableReasonTTY        CFSTR("A remote user is connected. That prevents system sleep.")
 
-__private_extern__ void                 logASLMessageSleep(const char *sig, const char *uuidStr, 
+__private_extern__ void                 logASLMessagePMStart(void);
+__private_extern__ void                 logASLMessageSleep(const char *sig, const char *uuidStr,
                                                            const char *failureStr, int sleep_type);
 
-enum {
-    kIsFullWake = 0,
-    kIsDarkWake = 1,
-    kIsDarkToFullWake = 2,
-    kIsS0Sleep
-};
-__private_extern__ void                 logASLMessageWake(const char *sig, const char *uuidStr, 
-                                                          const char *failureStr, int dark_wake);
-
-__private_extern__ void                 logASLMessageFilteredFailure(uint64_t pmFailureStage, const char *pmFailureString,
-                                                                     const char *uuidStr, int shutdowncode);
+__private_extern__ void                 logASLMessageWake(const char *sig, const char *uuidStr,
+                                                        const char *failureStr,
+                                                        IOPMCapabilityBits in_capabilities, WakeTypeEnum dark_wake);
 
 __private_extern__ void                 logASLMessageHibernateStatistics(void);
 
-__private_extern__ void                 logASLMessageApplicationResponse(CFStringRef logSourceString, CFStringRef appNameString,
-                                                                         CFStringRef responseTypeString, CFNumberRef responseTime,
-                                                                         int notificationBits);
+__private_extern__ void                 logASLMessagePMConnectionResponse(CFStringRef logSourceString, CFStringRef appNameString,
+                                                         CFStringRef responseTypeString, CFNumberRef responseTime,
+                                                         int notificationBits);
 
-__private_extern__ void                  logASLMessageAppNotify( CFStringRef appNameString, int notificationBits);
-__private_extern__ void                 logASLMessageKernelApplicationResponses(void);
-
-__private_extern__ void                 logASLMessageSystemPowerState(bool inS3, int runState);
-
+__private_extern__ void                 logASLPMConnectionNotify(CFStringRef appNameString, int notificationBits);
+__private_extern__ void                 logASLMessageIORegisterForSystemPowerResponses(void);
 
 __private_extern__ void                 logASLMessagePMConnectionScheduledWakeEvents(CFStringRef requestedMaintenancesString);
 
 __private_extern__ void                 logASLMessageExecutedWakeupEvent(CFStringRef requestedMaintenancesString);
+
+#if !TARGET_OS_EMBEDDED
+__private_extern__ void                 logASLMessageIgnoredDWTEmergency(void);
+#endif
+
+__private_extern__ void                 logASLMessageSleepCanceledAtLastCall(void);
 
 #define kAppResponseLogSourceKernel             CFSTR("Kernel")
 #define kAppResponseLogSourcePMConnection       CFSTR("PMConnection")
 #define kAppResponseLogSourceSleepServiceCap    CFSTR("SleepService")
 
 /*
- * If a PMConnection client doesn't respond to a sleep/wake notification in longer 
+ * If a PMConnection client doesn't respond to a sleep/wake notification in longer
  * than kAppResponseLogThresholdMS, log it to pmset -g log.
  */
 #define kAppResponseLogThresholdMS              250
@@ -424,7 +479,9 @@ __private_extern__ void                 logASLMessageExecutedWakeupEvent(CFStrin
 #define kPMSettingsDictionaryDateKey            "Date"
 #define kPMSettingsDictionaryUUIDKey            "UUID"
 
-/* PM Kernel shares times with user space in a packed 64-bit integer. 
+__private_extern__ aslmsg               new_msg_pmset_log(void);
+
+/* PM Kernel shares times with user space in a packed 64-bit integer.
  * Seconds since 1970 in the lower 32, microseconds in the upper 32.
  */
 __private_extern__ CFAbsoluteTime       _CFAbsoluteTimeFromPMEventTimeStamp(uint64_t kernelPackedTime);
@@ -444,8 +501,8 @@ __private_extern__ void                 wakeDozingMachine(void);
 __private_extern__ CFUserNotificationRef _copyUPSWarning(void);
 __private_extern__ IOReturn              _smcWakeTimerPrimer(void);
 __private_extern__ IOReturn              _smcWakeTimerGetResults(uint16_t *mSec);
-__private_extern__ bool                  smcSilentRunningSupport(void);
 #endif
+__private_extern__ bool                  smcSilentRunningSupport(void);
 
 __private_extern__ void                 _askNicelyThenShutdownSystem(void);
 __private_extern__ void                 _askNicelyThenRestartSystem(void);
@@ -458,8 +515,12 @@ __private_extern__ SCDynamicStoreRef    _getSharedPMDynamicStore(void);
 // getUUIDString copies the UUID string into the provided buffer
 // returns true on success; or false if the copy failed, or the UUID does not exist
 __private_extern__ bool                 _getUUIDString(char *buf, int buflen);
+__private_extern__ CFStringRef          _updateSleepReason(void);
 __private_extern__ bool                 _getSleepReason(char *buf, int buflen);
+__private_extern__ void                 _resetWakeReason( );
+__private_extern__ void                 _updateWakeReason(CFStringRef *wakeReason, CFStringRef *wakeType);
 __private_extern__ bool                 _getWakeReason(char *buf, int buflen);
+__private_extern__ void                 getCFWakeReason (CFStringRef *wakeReason, CFStringRef *wakeType);
 
 __private_extern__ io_registry_entry_t  getRootDomain(void);
 __private_extern__ IOReturn             _setRootDomainProperty(CFStringRef key, CFTypeRef val);
@@ -484,9 +545,16 @@ __private_extern__ bool getAggressivenessValue(CFDictionaryRef     dict,
                                                CFNumberType        type,
                                                uint32_t           *ret);
 
+#if !TARGET_OS_EMBEDDED
+__private_extern__ bool auditTokenHasEntitlement(
+                                                 audit_token_t token,
+                                                 CFStringRef entitlement);
+#endif
 
 __private_extern__ void                 _oneOffHacksSetup(void);
 
 __private_extern__ IOReturn getNvramArgInt(char *key, int *value);
+
+__private_extern__ uint64_t             getMonotonicTime( );
 #endif
 
