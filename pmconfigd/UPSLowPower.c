@@ -34,8 +34,9 @@
 #include <sys/syslog.h>
 #include <syslog.h>
 
+#include "BatteryTimeRemaining.h"
 #include "PrivateLib.h"
-#include "PSLowPower.h"
+#include "UPSLowPower.h"
 #include "PMSettings.h"
 
 // Data structure to track UPS shutdown thresholds
@@ -83,11 +84,11 @@ enum {
     _kIOUPSExternalPowerBit
 };
 
-/* PSLowPowerPrime
+/* UPSLowPowerPrime
  *
  * Init
  */
-__private_extern__ void PSLowPower_prime(void)
+__private_extern__ void UPSLowPower_prime(void)
 {
     _thresh = (threshold_struct *)malloc(sizeof(threshold_struct));
     
@@ -96,13 +97,13 @@ __private_extern__ void PSLowPower_prime(void)
 }
 
 
-/* PSLowPowerPrefsHaveChanged
+/* UPSLowPowerPrefsHaveChanged
  *
  * Update UPS shutdown thresholds when preferences change on disk.
  * Must be called after
  */
 __private_extern__ void
-PSLowPowerPrefsHaveChanged(void) 
+UPSLowPowerPrefsHaveChanged(void)
 {
     if(_thresh)
     {
@@ -111,16 +112,15 @@ PSLowPowerPrefsHaveChanged(void)
 }
 
 
-/* PSLowPowerPSChange
+/* UPSLowPowerPSChange
  *
  * Is the handler that gets notified when power source (battery or UPS)
  * state changes. We might respond to this by posting a user notification
  * or performing emergency shutdown.
  */
 __private_extern__ void
-PSLowPowerPSChange(CFTypeRef ps_blob) 
+UPSLowPowerPSChange(void)
 {
-    CFTypeRef           ups = NULL;
     CFDictionaryRef     ups_info = 0;
     int                 t1, t2;
     CFNumberRef         n1, n2;
@@ -131,7 +131,7 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
     CFStringRef         power_source = 0;
     CFNumberRef         ups_id = 0;
     
-    // Bail immediately if another application (like APC's PowerChute) 
+    // Exit immediately if another application
     //   is managing emergency UPS shutdown
     if(!_weManageUPSPower()) {
         goto _exit_PowerSourcesHaveChanged_;
@@ -140,11 +140,8 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
     // *** Inspect UPS power levels
     // We assume we're only dealing with 1 UPS for simplicity.
     // The "more than one UPS attached " case is undefined.
-    if((ups = IOPSGetActiveUPS(ps_blob)))
+    if((ups_info = getActiveUPSDictionary()))
     {
-        ups_info = isA_CFDictionary(IOPSGetPowerSourceDescription(ps_blob, ups));
-        if(!ups_info) goto _exit_PowerSourcesHaveChanged_;
-
         ups_id = isA_CFNumber(CFDictionaryGetValue(ups_info, CFSTR(kIOPSPowerSourceIDKey)));
         if(!ups_id) goto _exit_PowerSourcesHaveChanged_;
         
@@ -196,10 +193,7 @@ PSLowPowerPSChange(CFTypeRef ps_blob)
 
         }
         
-        // TODO: switch this battery-present check for the IOKit 
-        //       private API IOPMSystemSupportsUPSShutdown
-        // Is an internal battery present?
-        if(kCFBooleanTrue == IOPSPowerSourceSupported(ps_blob, CFSTR(kIOPMBatteryPowerKey)))
+        if(_batteryCount() > 0)
         {
             // Do not do UPS shutdown if internal battery is present.
             // Internal battery may still be providing power. 
@@ -561,9 +555,7 @@ exit:
 static void
 _itIsLaterNow(CFRunLoopTimerRef tmr, void *info)
 {
-    CFTypeRef snap = IOPSCopyPowerSourcesInfo();
-    PSLowPowerPSChange(snap);
-    CFRelease(snap);
+    UPSLowPowerPSChange();
     return;
 }
 

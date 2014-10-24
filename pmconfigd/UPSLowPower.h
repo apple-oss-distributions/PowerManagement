@@ -28,13 +28,13 @@
  * 29-Aug-02 ebold created
  *
  */
-#ifndef _PSLowPower_h_
-#define _PSLowPower_h_
+#ifndef _UPSLowPower_h_
+#define _UPSLowPower_h_
  
-__private_extern__ void PSLowPower_prime(void);
+__private_extern__ void UPSLowPower_prime(void);
 
-__private_extern__ void PSLowPowerPSChange(CFTypeRef);
+__private_extern__ void UPSLowPowerPSChange();
 
-__private_extern__ void PSLowPowerPrefsHaveChanged(void);
+__private_extern__ void UPSLowPowerPrefsHaveChanged(void);
 
-#endif //_PSLowPower_h_
+#endif //_UPSLowPower_h_
