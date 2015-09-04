@@ -111,16 +111,6 @@ static DTOption darktool_options[] =
         "Override the system default TCPKeepAliveExpiration override (in seconds). Please specify 1 second for fastest timeout (not 0). This setting does not persist across reboots.",
         { NULL }, { NULL }},
 
-    { {kActionSetTCPWakeQuotaInterval,
-        required_argument, NULL, 0}, kActionType,
-        "Override the system default TCPKeepAlive wake quota interval (in seconds). Passing 0 will disable wake quota. This setting does not persist across reboots.",
-        { NULL }, { NULL }},
-    
-    { {kActionSetTCPWakeQuota,
-        required_argument, NULL, 0}, kActionType,
-        "Override the system default TCPKeepAlive wake quota count (in number of non-user wakes to allow per WakeQuotaInterval). Passing 0 will disable wake quota. This setting does not persist across reboots.",
-        { NULL }, { NULL }},
-    
     { {kActionDoAckTimeout,
         required_argument, &args.doAction[kDoAckTimeoutIndex], 1}, kActionType,
         "darktool acts as a negligent API client, and doesn't ack any notifications from IOPMConnection \
@@ -468,18 +458,6 @@ static bool parse_it_all(int argc, char *argv[]) {
             printf("Updated \"TCPKeepAliveExpiration\" to %lds\n", temp_arg);
             exit(0);
         }
-        else if (arg && !strcmp(arg, kActionSetTCPWakeQuotaInterval)) {
-            temp_arg = strtol(optarg, NULL, 10);
-            IOPMSetValueInt(kIOPMTCPWakeQuotaInterval, (int)temp_arg);
-            printf("Updated \"TCPWakeQuotaInterval\" to %lds\n", temp_arg);
-            exit(0);
-        }
-        else if (arg && !strcmp(arg, kActionSetTCPWakeQuota)) {
-            temp_arg = strtol(optarg, NULL, 10);
-            IOPMSetValueInt(kIOPMTCPWakeQuota, (int)temp_arg);
-            printf("Updated \"TCPWakeQuota\" to %ld\n", temp_arg);
-            exit(0);
-        }
         else if (arg && !strcmp(arg, kOptionIterations)) {
             args.iterationsCount = (int)strtol(optarg, NULL, 10);
             strtol(optarg, NULL, 10);
@@ -703,7 +681,7 @@ static void executeTimedActions(const char *why)
     else if (args.callIOKit[0]) {
         printf("Call IOKit function %s\n", args.callIOKit);
         execute_APICall(args.callIOKit);
-    } else if (args.exec) {
+    } else if (args.exec[0]) {
     
         exec_exec(args.exec);
     }
@@ -1119,6 +1097,7 @@ static void print_everything_dark(void)
 {
     
     CFTypeRef           b;
+    bool tcpka_activeConnectionsExist = false;
     
     IOPlatformCopyFeatureDefault(kIOPlatformTCPKeepAliveDuringSleep, &b);
     printf("  Platform: TCPKeepAliveDuringSleep = %s\n", (kCFBooleanTrue == b) ? "yes":"no");
@@ -1130,13 +1109,11 @@ static void print_everything_dark(void)
     
     int tcpKeepAliveActive = IOPMGetValueInt(kIOPMTCPKeepAliveIsActive);
     int tcpKeepAliveExpires = IOPMGetValueInt(kIOPMTCPKeepAliveExpirationOverride);
-    int tcpWakeQuotaInterval = IOPMGetValueInt(kIOPMTCPWakeQuotaInterval);
-    int tcpWakeQuotaCount = IOPMGetValueInt(kIOPMTCPWakeQuota);
+    IOPMGetActivePushConnectionState(&tcpka_activeConnectionsExist);
     
     printf("  TCPKeepAlive Active = %d\n", tcpKeepAliveActive);
     printf("  TCPKeepAlive Expiration = %ds\n", tcpKeepAliveExpires);
-    printf("  TCPKeepAlive WakeQuotaInterval = %ds\n", tcpWakeQuotaInterval);
-    printf("  TCPKeepAlive WakeQuotaCount = %d\n", tcpWakeQuotaCount);
+    printf("  TCPKeepAlive ConnectionsExist = %s\n", (tcpka_activeConnectionsExist) ? "yes" : "no");
 }
 
 enum {
