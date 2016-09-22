@@ -10,6 +10,8 @@
 #include <IOKit/ps/IOPowerSourcesPrivate.h>
 #include <IOKit/ps/IOPSKeys.h>
 #include <IOKit/IOCFSerialize.h>
+#include <spawn.h>
+#include "PMtests.h"
 
 static CFDictionaryRef      copyNextPSDictionary(CFStringRef type);
 static CFStringRef          copyNextPSType(void);
@@ -22,8 +24,11 @@ static void fillAndReleaseAllPowerSourceSlots(int count);
 static const int kTryDictionaries = 5;
 static const int kMaxPSCount = 7;
 
+int gPassCnt = 0, gFailCnt = 0;
+
 int main(int argc, const char * argv[])
 {
+    START_TEST("Test Power Source APIs\n");
     for (int i = 0; i< 3; i++)
     {
         iterateCreateSetRelease(kTryDictionaries);
@@ -31,6 +36,7 @@ int main(int argc, const char * argv[])
         createAndCheckForExistence(CFSTR("Snaggletooth"), CFSTR(kIOPSAccessoryType));
         fillAndReleaseAllPowerSourceSlots(kMaxPSCount * 2);
     }
+    SUMMARY("Test Power Source APIs");
 }
 
 
@@ -40,6 +46,7 @@ int main(int argc, const char * argv[])
 
 static void createAndCheckForExistence(CFStringRef useName, CFStringRef type)
 {
+    START_TEST_CASE("Create a UPS type power source\n");
     CFDictionaryRef         useDictionary = NULL;
     CFMutableDictionaryRef  setDictionary = NULL;
     IOReturn                ret;
@@ -56,35 +63,39 @@ static void createAndCheckForExistence(CFStringRef useName, CFStringRef type)
             CFDictionarySetValue(setDictionary, CFSTR(kIOPSNameKey), useName);
         }
         CFRelease(useDictionary);
+        useDictionary = NULL;
     }
 
     if (!setDictionary) {
-        printf("FAIL: createAndCheckForExistence couldn't create PS dictionary\n");
-        return;
+        FAIL("createAndCheckForExistence couldn't create PS dictionary\n");
+        goto exit;
     }
 
     ret = IOPSCreatePowerSource(&psid);
     if (kIOReturnSuccess != ret) {
-        printf("FAIL: createAndCheckForExistence couldn't create PS power source 0x%08x\n", ret);
-        return;
+        FAIL("createAndCheckForExistence couldn't create PS power source 0x%08x\n", ret);
+        goto exit;
     }
 
     ret = IOPSSetPowerSourceDetails(psid, setDictionary);
     if (kIOReturnSuccess != ret) {
-        printf("[FAIL] Failure return 0x%08x from IOPSSetPowerSourceDetails\n", ret);
-        exit(1);
+        FAIL("Failure return 0x%08x from IOPSSetPowerSourceDetails\n", ret);
+        goto exit;
     }
-    CFRelease(setDictionary);
+
 
     if (verifyThatAPublishedPowerSourceIsNamed(useName, type))
     {
-        printf("[PASS] Successfully created, then found, a power source named %s\n", buf);
+        LOG("Successfully created, then found, a power source named %s\n", buf);
     } else {
-        printf("[FAIL] createAndCheckForExistence couldn't locate a power source named %s\n", buf);
-        system("pmset -g ps");
+        char * argv[] = {"pmset -g ps", NULL};
+        posix_spawn(NULL, argv[0], NULL, NULL, argv, NULL);
+        FAIL("createAndCheckForExistence couldn't locate a power source named %s\n", buf);
+        goto exit;
     }
 
     IOPSReleasePowerSource(psid);
+    psid = 0;
 
     // We want to wait a second to let the release power source percolate through powerd
     // before we check if the Release worked.
@@ -92,13 +103,26 @@ static void createAndCheckForExistence(CFStringRef useName, CFStringRef type)
 
     if (!verifyThatAPublishedPowerSourceIsNamed(useName, type))
     {
-        printf("[PASS] Successfully RELEASED (it's not published any more), a power source named %s\n", buf);
+        LOG("Successfully RELEASED (it's not published any more), a power source named %s\n", buf);
     } else {
-        printf("[FAIL] createAndCheckForExistence just released a power source, but it's still published %s\n", buf);
-        system("pmset -g ps");
+        char * argv[] = {"pmset -g ps", NULL};
+        posix_spawn(NULL, argv[0], NULL, NULL, argv, NULL);
+        FAIL("createAndCheckForExistence just released a power source, but it's still published %s\n", buf);
+        goto exit;
     }
 
     fflush(stdout);
+    PASS("Create a UPS type power source\n");
+exit:
+    if (psid) {
+        IOPSReleasePowerSource(psid);
+    }
+    if (useDictionary) {
+        CFRelease(useDictionary);
+    }
+    if (setDictionary) {
+        CFRelease(setDictionary);
+    }
     return;
 }
 
@@ -120,7 +144,7 @@ static bool verifyThatAPublishedPowerSourceIsNamed(CFStringRef checkname, CFStri
     }
 
     if (!arr) {
-        return false;
+        goto bail;
     }
 
     for (int i=0; i<CFArrayGetCount(arr); i++) {
@@ -137,6 +161,7 @@ static bool verifyThatAPublishedPowerSourceIsNamed(CFStringRef checkname, CFStri
         }
     }
 
+bail:
     if (arr) {
         CFRelease(arr);
     }
@@ -153,13 +178,14 @@ static void fillAndReleaseAllPowerSourceSlots(int count)
 
     IOPSPowerSourceID *ids = calloc(count, sizeof(IOPSPowerSourceID));
 
+    START_TEST_CASE("Fill and Release Power Source Slots\n");
     for (int i=0; i<count; i++)
     {
 
         CFStringRef     pstype = copyNextPSType();
         if (!pstype) {
-            printf("[FAIL] internal error generating testing ps type");
-            exit(1);
+            FAIL("internal error generating testing ps type");
+            goto exit;
         }
 
         /*
@@ -167,13 +193,13 @@ static void fillAndReleaseAllPowerSourceSlots(int count)
          */
         ret = IOPSCreatePowerSource(&ids[i]);
 
-        printf("Creating %d power sources to exceed limits (%d returns 0x%08x)\n", count, i, ret);
+        LOG("Creating %d power sources to exceed limits (%d returns 0x%08x)\n", count, i, ret);
         if (ret != kIOReturnSuccess
             && ret != kIOReturnNoSpace)
         {
-            printf("[FAIL] IOPSCreatePowerSource return value was 0x%08x, should have been Success or NoSpace.\n", ret);
+            FAIL("IOPSCreatePowerSource return value was 0x%08x, should have been Success or NoSpace.\n", ret);
+            goto exit;
         }
-        fflush(stdout);
     }
 
 
@@ -184,12 +210,16 @@ static void fillAndReleaseAllPowerSourceSlots(int count)
          */
         ret = IOPSReleasePowerSource(ids[i]);
         if (kIOReturnSuccess != ret) {
-            printf("[FAIL] Failure return 0x%08x from IOPSReleasePowerSource\n", ret);
+            FAIL("Failure return 0x%08x from IOPSReleasePowerSource\n", ret);
+            goto exit;
         }
-        printf("Release %d power sources to exceed limits (%d returns 0x%08x)\n", count, i, ret);
-    fflush(stdout);
+        LOG("Release %d power sources to exceed limits (%d returns 0x%08x)\n", count, i, ret);
     }
     
+    PASS("Fill and Release Power Source Slots\n");
+exit:
+    if (ids) { free(ids); }
+    return;
 }
 
 static void iterateCreateSetRelease(int iterations)
@@ -198,14 +228,15 @@ static void iterateCreateSetRelease(int iterations)
 
     IOPSPowerSourceID psid = NULL;
 
+    START_TEST_CASE("Create, Set and Release Poweer Sources\n");
     for (int i=0; i<iterations; i++)
     {
-        printf("Big iteration %d of %d\n", i, iterations);
+        LOG("Big iteration %d of %d\n", i, iterations);
 
         CFStringRef     pstype = copyNextPSType();
         if (!pstype) {
-            printf("[FAIL] internal error generating testing ps type");
-            exit(1);
+            FAIL("internal error generating testing ps type");
+            goto exit;
         }
 
         /*
@@ -213,8 +244,8 @@ static void iterateCreateSetRelease(int iterations)
          */
         ret = IOPSCreatePowerSource(&psid);
         if (kIOReturnSuccess != ret) {
-            printf("[FAIL] Failure return 0x%08x from IOPSCreatePowerSource\n", ret);
-            exit(1);
+            FAIL("Failure return 0x%08x from IOPSCreatePowerSource\n", ret);
+            goto exit;
         }
 
         /*
@@ -224,13 +255,14 @@ static void iterateCreateSetRelease(int iterations)
         psdict = copyNextPSDictionary(NULL);
 
         if (!psdict) {
-            printf("[FAIL] internal error generating testing dictionary");
+            FAIL("internal error generating testing dictionary");
             exit(1);
         }
         ret = IOPSSetPowerSourceDetails(psid, psdict);
         if (kIOReturnSuccess != ret) {
-            printf("[FAIL] Failure return 0x%08x from IOPSSetPowerSourceDetails\n", ret);
-            exit(1);
+            FAIL("Failure return 0x%08x from IOPSSetPowerSourceDetails\n", ret);
+            CFRelease(psdict);
+            goto exit;
         }
         CFRelease(psdict);
 
@@ -239,14 +271,17 @@ static void iterateCreateSetRelease(int iterations)
          */
         ret = IOPSReleasePowerSource(psid);
         if (kIOReturnSuccess != ret) {
-            printf("[FAIL] Failure return 0x%08x from IOPSReleasePowerSource\n", ret);
-            exit(1);
+            FAIL("Failure return 0x%08x from IOPSReleasePowerSource\n", ret);
+            goto exit;
         }
 
         fflush(stdout);
 
     }
     
+    PASS("Create, Set and Release Poweer Sources\n");
+exit:
+    return;
 }
 
 
@@ -310,7 +345,7 @@ static CFDictionaryRef copyNextPSDictionary(CFStringRef type)
     int tmpInt = 0;
 
     int count = sizeof(keys)/sizeof(CFTypeRef);
-    values = calloc(1, sizeof(keys));
+    values = (CFTypeRef *)calloc(1, count * sizeof(CFTypeRef));
 
     tmpInt = 6000;
     values[kCurrentCapacity] = CFNumberCreate(0, kCFNumberIntType, &tmpInt);

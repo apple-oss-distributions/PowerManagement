@@ -59,7 +59,7 @@
 #include <IOKit/platform/AppleARMPMUKeys.h>
 #endif
 
-#include "IOUPSPlugIn.h"
+#include <IOKit/ps/IOUPSPlugIn.h>
 #include "IOUPSPrivate.h"
 
 #define kDefaultUPSName		"Generic UPS"
@@ -74,6 +74,8 @@ static CFMutableArrayRef        gUPSDataArrayRef = NULL;
 static unsigned int             gUPSCount = 0;
 static IONotificationPortRef	gNotifyPort = NULL;
 static io_iterator_t            gAddedIter = MACH_PORT_NULL;
+const unsigned int              BATTERY_CASE_BOOST_ENABLE_THRESHOLD = 95;
+const unsigned int              BATTERY_CASE_BOOST_DISABLE_THRESHOLD = 100;
 
 //---------------------------------------------------------------------------
 // TypeDefs
@@ -87,9 +89,11 @@ typedef struct UPSData {
     CFMutableDictionaryRef  upsStoreDict;
     CFRunLoopSourceRef      upsEventSource;
     CFRunLoopTimerRef       upsEventTimer;
-    Boolean                 isBatteryCase;
-    Boolean                 isAccessoryBattery;
+    uint32_t                isBatteryCase:1;
+    uint32_t                isAccessoryBattery:1;
+    uint32_t                isUPS:1;
     Boolean                 hasACPower;
+    Boolean                 isBatteryCaseEnabled;
     io_object_t             batteryStateNotification;
     io_object_t             currentLimitNotification;
     io_object_t             requiredVoltageNotification;
@@ -108,6 +112,7 @@ static void ProcessUPSEventSource(CFTypeRef typeRef, CFRunLoopTimerRef * pTimer,
 static void UPSDeviceAdded(void *refCon, io_iterator_t iterator);
 static void DeviceNotification(void *refCon, io_service_t service,
                                natural_t messageType, void *messageArgument);
+static void RemoveAndReleasePowerManagerUPSEntry(UPSDataRef upsDataRef);
 static void UPSEventCallback(void * target, IOReturn result, void *refcon,
                              void *sender, CFDictionaryRef event);
 static void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event);
@@ -117,7 +122,6 @@ static IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
                                            CFDictionaryRef properties,
                                            CFSetRef capabilities);
 static Boolean SetupMIGServer();
-static int scheduleRTCWake(io_service_t chargerService, int deadlineSec);
 
 //---------------------------------------------------------------------------
 // Battery case helper functions
@@ -482,6 +486,9 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator) {
                         upsDataRef->isBatteryCase = true;
                         upsDataRef->hasACPower = false;
                     }
+                    else {
+                        upsDataRef->isUPS = true;
+                    }
                 }
                 
                 CFRelease(usagePairs);
@@ -501,6 +508,7 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator) {
                 // Initialize AC state manually according to the default value.
                 // If a UPS is not on battery power, this will get fixed in the
                 // first ProcessUPSEvent call below
+                upsDataRef->isBatteryCaseEnabled = true;
                 BatteryCaseHandleACStateChange(upsDataRef, CFSTR(kIOPSBatteryPowerValue));
                 
                 // Register for interest in battery state changes to update
@@ -509,7 +517,7 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator) {
                                                                           IOServiceMatching("AppleARMPMUCharger"));
                 
                 if (chargerService != MACH_PORT_NULL) {
-                    kr = IOServiceAddInterestNotification(gNotifyPort,
+                    IOServiceAddInterestNotification(gNotifyPort,
                                                           chargerService,
                                                           kIOGeneralInterest,
                                                           BatteryCaseBatteryStateChangedCallback,
@@ -529,14 +537,15 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator) {
                                                     UPSEventCallback, NULL,
                                                     upsDataRef);
             
-            IOServiceAddInterestNotification(
-                                             gNotifyPort, // notifyPort
-                                             upsDevice, // service
-                                             kIOGeneralInterest, // interestType
-                                             DeviceNotification, // callback
-                                             upsDataRef, // refCon
-                                             &(upsDataRef->notification)); // notification
-            notify_post(kIOPSNotifyAttach);
+            kr = IOServiceAddInterestNotification(gNotifyPort, // notifyPort
+                                                  upsDevice, // service
+                                                  kIOGeneralInterest, // interestType
+                                                  DeviceNotification, // callback
+                                                  upsDataRef, // refCon
+                                                  &(upsDataRef->notification)); // notification
+            if (kr != kIOReturnSuccess)
+                goto UPSDEVICEADDED_FAIL;
+            
             goto UPSDEVICEADDED_CLEANUP;
         }
         
@@ -559,6 +568,10 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator) {
                                  kCFRunLoopDefaultMode);
             upsEventSource = NULL;
         }
+        if (upsDataRef) {
+            RemoveAndReleasePowerManagerUPSEntry(upsDataRef);
+            upsDataRef = NULL;
+        }
         
     UPSDEVICEADDED_CLEANUP:
         // Clean up
@@ -580,72 +593,85 @@ void DeviceNotification(void *refCon, io_service_t service,
                         natural_t messageType, void *messageArgument ) {
     UPSDataRef upsDataRef = (UPSDataRef) refCon;
     
-    if ((upsDataRef != NULL) &&
-        (messageType == kIOMessageServiceIsTerminated)) {
-        upsDataRef->isPresent = FALSE;
-        
-        notify_post(kIOPSNotifyAttach);
-        
-        if (upsDataRef->upsEventSource) {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(),
-                                  upsDataRef->upsEventSource,
-                                  kCFRunLoopDefaultMode);
-            CFRelease(upsDataRef->upsEventSource);
-            upsDataRef->upsEventSource = NULL;
+    if ((upsDataRef != NULL) && (messageType == kIOMessageServiceIsTerminated)) {
+        RemoveAndReleasePowerManagerUPSEntry(upsDataRef);
+    }
+}
+
+
+//---------------------------------------------------------------------------
+// RemoveAndReleasePowerManagerUPSEntry
+//
+// Remove a UPS from the list of active power sources and perform all
+// necessary cleanup.
+//
+// No-op if upsDataRef is NULL
+//---------------------------------------------------------------------------
+void RemoveAndReleasePowerManagerUPSEntry(UPSDataRef upsDataRef) {
+    if (upsDataRef == NULL)
+        return;
+    
+    upsDataRef->isPresent = FALSE;
+    
+    
+    if (upsDataRef->upsEventSource) {
+        CFRunLoopRemoveSource(CFRunLoopGetCurrent(),
+                              upsDataRef->upsEventSource,
+                              kCFRunLoopDefaultMode);
+        CFRelease(upsDataRef->upsEventSource);
+        upsDataRef->upsEventSource = NULL;
+    }
+    
+    if (upsDataRef->upsEventTimer) {
+        CFRunLoopRemoveTimer(CFRunLoopGetCurrent(),
+                             upsDataRef->upsEventTimer,
+                             kCFRunLoopDefaultMode);
+        CFRelease(upsDataRef->upsEventTimer);
+        upsDataRef->upsEventTimer = NULL;
+    }
+    
+    if (upsDataRef->upsPlugInInterface != NULL) {
+        (*(upsDataRef->upsPlugInInterface))->Release(upsDataRef->upsPlugInInterface);
+        upsDataRef->upsPlugInInterface = NULL;
+    }
+    
+    if (upsDataRef->batteryStateNotification != MACH_PORT_NULL) {
+        IOObjectRelease(upsDataRef->batteryStateNotification);
+        upsDataRef->batteryStateNotification = MACH_PORT_NULL;
+    }
+    
+    if (upsDataRef->currentLimitNotification != MACH_PORT_NULL) {
+        IOObjectRelease(upsDataRef->currentLimitNotification);
+        upsDataRef->currentLimitNotification = MACH_PORT_NULL;
+    }
+    
+    if (upsDataRef->requiredVoltageNotification != MACH_PORT_NULL) {
+        IOObjectRelease(upsDataRef->requiredVoltageNotification);
+        upsDataRef->requiredVoltageNotification = MACH_PORT_NULL;
+    }
+    
+    if (upsDataRef->notification != MACH_PORT_NULL) {
+        IOObjectRelease(upsDataRef->notification);
+        upsDataRef->notification = MACH_PORT_NULL;
+    }
+    
+    if (upsDataRef->upsStoreDict) {
+        CFRelease(upsDataRef->upsStoreDict);
+        upsDataRef->upsStoreDict = NULL;
+    }
+    
+    if (upsDataRef->powerSourceID) {
+        IOReturn result = IOPSReleasePowerSource(upsDataRef->powerSourceID);
+        gUPSCount--;
+        if (result != kIOReturnSuccess) {
+            syslog(LOG_ERR, "IOPSReleasePowerSource failed (IOReturn: %d)\n", result);
         }
-        
-        if (upsDataRef->upsEventTimer) {
-            CFRunLoopRemoveTimer(CFRunLoopGetCurrent(),
-                                 upsDataRef->upsEventTimer,
-                                 kCFRunLoopDefaultMode);
-            CFRelease(upsDataRef->upsEventTimer);
-            upsDataRef->upsEventTimer = NULL;
-        }
-        
-        if (upsDataRef->upsPlugInInterface != NULL) {
-            (*(upsDataRef->upsPlugInInterface))->Release(upsDataRef->upsPlugInInterface);
-            upsDataRef->upsPlugInInterface = NULL;
-        }
-        
-        if (upsDataRef->batteryStateNotification != MACH_PORT_NULL) {
-            IOObjectRelease(upsDataRef->batteryStateNotification);
-            upsDataRef->batteryStateNotification = MACH_PORT_NULL;
-        }
-        
-        if (upsDataRef->currentLimitNotification != MACH_PORT_NULL) {
-            IOObjectRelease(upsDataRef->currentLimitNotification);
-            upsDataRef->currentLimitNotification = MACH_PORT_NULL;
-        }
-        
-        if (upsDataRef->requiredVoltageNotification != MACH_PORT_NULL) {
-            IOObjectRelease(upsDataRef->requiredVoltageNotification);
-            upsDataRef->requiredVoltageNotification = MACH_PORT_NULL;
-        }
-        
-        if (upsDataRef->notification != MACH_PORT_NULL) {
-            IOObjectRelease(upsDataRef->notification);
-            upsDataRef->notification = MACH_PORT_NULL;
-        }
-        
-        if (upsDataRef->upsStoreDict) {
-            CFRelease(upsDataRef->upsStoreDict);
-            upsDataRef->upsStoreDict = NULL;
-        }
-        
-        if (upsDataRef->powerSourceID) {
-            IOReturn result = IOPSReleasePowerSource(upsDataRef->powerSourceID);
-            gUPSCount--;
-            if (result != kIOReturnSuccess) {
-                syslog(LOG_ERR, "IOPSReleasePowerSource failed (IOReturn: %d\n",
-                       result);
-            }
-            upsDataRef->powerSourceID = NULL;
-        }
-        
-        if (gUPSCount == 0) {
-            CFRelease(gUPSDataArrayRef);
-            CleanupAndExit();
-        }
+        upsDataRef->powerSourceID = NULL;
+    }
+    
+    if (gUPSCount == 0) {
+        CFRelease(gUPSDataArrayRef);
+        CleanupAndExit();
     }
 }
 
@@ -672,7 +698,7 @@ kern_return_t BatteryCaseSetDeviceCurrentLimit(CFTypeRef currentLimitRef) {
     io_connect_t connect = NULL;
     
     // Ensure the argument is a CFNumber
-    if (CFGetTypeID(currentLimitRef) != CFNumberGetTypeID()) {
+    if (currentLimitRef == NULL || CFGetTypeID(currentLimitRef) != CFNumberGetTypeID()) {
         return KERN_INVALID_ARGUMENT;
     }
     
@@ -681,7 +707,7 @@ kern_return_t BatteryCaseSetDeviceCurrentLimit(CFTypeRef currentLimitRef) {
     // If the battery case ever tells us to charge below 200 mA, it means we've
     // sent them an iLim of 100 mA (USB unconfigured). Ignore this.
     if (currentLimit < 200) {
-        syslog(LOG_INFO, "ignoring battery case current limit < 200 (limit=%d)", currentLimit);
+        syslog(LOG_INFO, "ignoring battery case current limit < 200 (limit=%d)", (int) currentLimit);
         return KERN_SUCCESS;
     }
     
@@ -697,8 +723,13 @@ kern_return_t BatteryCaseSetDeviceCurrentLimit(CFTypeRef currentLimitRef) {
         return kr;
     }
     
-    kr = IOAccessoryManagerGetUSBCurrentLimitBase(service, &baseCurrentLimit);
+    UInt32 unsignedBaseCurrentLimit;
+    kr = IOAccessoryManagerGetUSBCurrentLimitBase(service, &unsignedBaseCurrentLimit);
     if (kr == KERN_SUCCESS) {
+        // IOAccessoryManagerGetUSBCurrentLimitBase requires an unsigned integer to
+        // store its result, but the value it stores is a singed integer, so it is
+        // safe to cast back. Cap the value against INT32_MAX just incase.
+        baseCurrentLimit = (SInt32) MIN(unsignedBaseCurrentLimit, INT32_MAX);
         kr = IOAccessoryManagerSetUSBCurrentOffset(connect, currentLimit - baseCurrentLimit);
     }
     
@@ -738,11 +769,8 @@ void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event) {
                 }
             // Battery cases will indicate how much current we can draw from them
             } else if (CFEqual(keys[index], CFSTR(kIOPSAppleBatteryCaseAvailableCurrentKey)) &&
-                       upsDataRef->isBatteryCase && !upsDataRef->hasACPower) {
-                kern_return_t kr = BatteryCaseSetDeviceCurrentLimit(values[index]);
-                if (kr != KERN_SUCCESS) {
-                    syslog(LOG_ERR, "Unable to set device current limit (Error: %s)\n", mach_error_string(kr));
-                }
+                       upsDataRef->isBatteryCase && !upsDataRef->hasACPower && upsDataRef->isBatteryCaseEnabled) {
+                BatteryCaseSetDeviceCurrentLimit(values[index]);
             }
             
             CFDictionarySetValue(upsDataRef->upsStoreDict, keys[index],
@@ -757,7 +785,6 @@ void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event) {
         if (result != kIOReturnSuccess) {
             syslog(LOG_ERR, "updating power source details failed\n");
         }
-        notify_post(kIOPSNotifyTimeRemaining);
     }
 }
 
@@ -798,6 +825,8 @@ kern_return_t BatteryCaseSendCommand(UPSDataRef upsDataRef, CFStringRef commandS
 //
 // Called whenever the PMU charger updates. We filter for battery state
 // changes, and tell battery cases what the internal state of charge is.
+// The battery case is also disabled/enabled based on the internal battery's
+// capacity to optimize battery life.
 //---------------------------------------------------------------------------
 void BatteryCaseBatteryStateChangedCallback(void *refcon, io_service_t service,
                                             uint32_t messageType, void *messageArgument) {
@@ -807,30 +836,57 @@ void BatteryCaseBatteryStateChangedCallback(void *refcon, io_service_t service,
     SInt32 currentCapacity;
     CFNumberRef maxCapacityRef;
     SInt32 maxCapacity;
+    SInt32 batteryPercentage;
+    kern_return_t kr;
     
     if (messageType == kIOPMMessageBatteryStatusHasChanged) {
         // Battery State has updated, get the current and max capacity (in mAh)
         currentCapacityRef = IORegistryEntrySearchCFProperty(service,
                                                               kIOServicePlane,
-                                                              CFSTR("CurrentCapacity"),
+                                                              CFSTR("AppleRawCurrentCapacity"),
                                                               kCFAllocatorDefault,
                                                               NULL);
         maxCapacityRef = IORegistryEntrySearchCFProperty(service,
                                                          kIOServicePlane,
-                                                         CFSTR("MaxCapacity"),
+                                                         CFSTR("AppleRawMaxCapacity"),
                                                          kCFAllocatorDefault,
                                                          NULL);
         
-        CFNumberGetValue(currentCapacityRef, kCFNumberSInt32Type, &currentCapacity);
-        CFNumberGetValue(maxCapacityRef, kCFNumberSInt32Type, &maxCapacity);
-        
-        // If we read a negative or 0 MaxCapacity, something's wrong, don't
-        // send the value.
-        if (maxCapacity > 0) {
-            // Send the command "Send Current State of Charge", as a %
-            BatteryCaseSendCommand(upsDataRef,
-                                   CFSTR(kIOPSCommandSendCurrentStateOfCharge),
-                                   (currentCapacity * 100) / maxCapacity);
+        if (currentCapacityRef && maxCapacityRef) {
+
+            CFNumberGetValue(currentCapacityRef, kCFNumberSInt32Type, &currentCapacity);
+            CFNumberGetValue(maxCapacityRef, kCFNumberSInt32Type, &maxCapacity);
+            batteryPercentage = (currentCapacity * 100) / maxCapacity;
+            
+            CFRelease(currentCapacityRef);
+            CFRelease(maxCapacityRef);
+
+            // If we read a negative or 0 MaxCapacity, something's wrong, don't
+            // send the value.
+            if (maxCapacity > 0) {
+                // Send the command "Send Current State of Charge", as a %
+                BatteryCaseSendCommand(upsDataRef,
+                                       CFSTR(kIOPSCommandSendCurrentStateOfCharge),
+                                       batteryPercentage);
+            }
+
+            // When AC is not present, enable the battery case until we reach 100%.
+            // The battery case is re-enabled once we drop to 95%.
+            if (!upsDataRef->hasACPower && upsDataRef->isBatteryCaseEnabled
+                && batteryPercentage >= BATTERY_CASE_BOOST_DISABLE_THRESHOLD) {
+                kr = BatteryCaseSendCommand(upsDataRef,
+                                            CFSTR(kIOPSAppleBatteryCaseCommandEnableChargingKey),
+                                            0);
+                if (kr == KERN_SUCCESS) upsDataRef->isBatteryCaseEnabled = false;
+                
+            } else if (!upsDataRef->hasACPower && !upsDataRef->isBatteryCaseEnabled
+                       && batteryPercentage <= BATTERY_CASE_BOOST_ENABLE_THRESHOLD) {
+                kr = BatteryCaseSendCommand(upsDataRef,
+                                            CFSTR(kIOPSAppleBatteryCaseCommandEnableChargingKey),
+                                            1);
+                if (kr == KERN_SUCCESS) upsDataRef->isBatteryCaseEnabled = true;
+            }
+
         }
     }
 #endif
@@ -853,11 +909,17 @@ void BatteryCaseCurrentLimitChangeCallback(void *refcon, io_service_t service,
     if (messageType == kIOAccessoryManagerMessageUSBCurrentLimitChange) {
         // Message came from IOAccessoryManager that the power source's current
         // limit has changed. Get the new base current limit.
-        kr = IOAccessoryManagerGetUSBCurrentLimitBase(service, &newCurrentLimit);
+        UInt32 unsignedNewCurrentLimit;
+        kr = IOAccessoryManagerGetUSBCurrentLimit(service, &unsignedNewCurrentLimit);
         if (kr != KERN_SUCCESS) {
             syslog(LOG_ERR, "unable to get new current limit\n");
             return;
         }
+        
+        // IOAccessoryManagerGetUSBCurrentLimitBase requires an unsigned integer to
+        // store its result, but the value it stores is a singed integer, so it is
+        // safe to cast back. Cap the value against INT32_MAX just incase.
+        newCurrentLimit = (SInt32) MIN(unsignedNewCurrentLimit, INT32_MAX);
         
         // Send the command, {"Set Current Limit": newCurrentLimit}, to the battery
         // case so it knows how much to draw from the power source behind it.
@@ -892,14 +954,17 @@ void BatteryCaseRequiredVoltageChangeCallback(void *refcon, io_service_t service
                                                     CFSTR("Voltage"),
                                                     kCFAllocatorDefault,
                                                     NULL);
-    CFNumberGetValue(reqVoltageRef, kCFNumberSInt32Type, &reqVoltageValue);
-    
-    // Send the command, "Set Required Voltage", with the value read from the
-    // registry + 150 mV of headroom.
-    BatteryCaseSendCommand(upsDataRef,
-                           CFSTR(kIOPSCommandSetRequiredVoltageKey),
-                           reqVoltageValue + 150);
-    
+    if (reqVoltageRef) {
+        CFNumberGetValue(reqVoltageRef, kCFNumberSInt32Type, &reqVoltageValue);
+        CFRelease(reqVoltageRef);
+        
+        // Send the command, "Set Required Voltage", with the value read from the
+        // registry + 150 mV of headroom.
+        BatteryCaseSendCommand(upsDataRef,
+                               CFSTR(kIOPSCommandSetRequiredVoltageKey),
+                               reqVoltageValue + 150);
+    }
+
 #endif
     // NOOP on OS X
 }
@@ -944,30 +1009,30 @@ void BatteryCaseHandleACStateChange(UPSDataRef upsDataRef, CFTypeRef powerState)
         
         // Re-eneble USB and unmask charging
         upsDataRef->hasACPower = true;
-        kr = IOAccessoryManagerSetUSBPowerIgnore(accessoryManagerConnect, false);
-        kr = IOAccessoryManagerRestoreUSBCurrentLimitBase(accessoryManagerConnect);
-        kr = IOAccessoryManagerSetUSBCurrentOffset(accessoryManagerConnect, 0);
+        IOAccessoryManagerRestoreUSBCurrentLimitBase(accessoryManagerConnect);
+        IOAccessoryManagerSetUSBPowerIgnore(accessoryManagerConnect, false);
+        IOAccessoryManagerSetUSBCurrentOffset(accessoryManagerConnect, 0);
         
         // Wait until IOAccessoryManager reports a non-zero iLim before sending
         // it to the battery case
         int retries = 20; // 20 * 250ms -> 5 second timeout
         while (currentLimit == 0 && retries-- > 0) {
             usleep(250000); // sleep for 250ms for now...
-            kr = IOAccessoryManagerGetUSBCurrentLimitBase(accessoryManagerService, &currentLimit);
-            syslog(LOG_ERR, "Battery Case AC Present: iLim = %d mA", currentLimit);
+            IOAccessoryManagerGetUSBCurrentLimitBase(accessoryManagerService, &currentLimit);
+            syslog(LOG_ERR, "Battery Case AC Present: iLim = %d mA", (unsigned int) currentLimit);
         }
         
         if (currentLimit != 0) {
-            syslog(LOG_INFO, "Initial downstream charger iLim: %d mA\n", currentLimit);
+            syslog(LOG_INFO, "Initial downstream charger iLim: %d mA\n", (unsigned int) currentLimit);
         } else {
             syslog(LOG_ERR, "Timedout waiting for AC charger's current limit\n");
         }
         
         // Send the battery case the power source's current limit
-        kr = BatteryCaseSendCommand(upsDataRef,
-                                    CFSTR(kIOPSCommandSetCurrentLimitKey),
-                                    currentLimit);
-        
+        BatteryCaseSendCommand(upsDataRef,
+                               CFSTR(kIOPSCommandSetCurrentLimitKey),
+                               currentLimit);
+
         // Once the iLim has been sent to the B244, we can let current inflow
         // resume at the new non-zero iLim
         IOPMAssertionRelease(disabledInflowAssertionID);
@@ -975,33 +1040,32 @@ void BatteryCaseHandleACStateChange(UPSDataRef upsDataRef, CFTypeRef powerState)
         
         // Set up notifications to send the battery case new current limits
         IOObjectRetain(accessoryManagerService);
-        kr = IOServiceAddInterestNotification(gNotifyPort,
-                                              accessoryManagerService,
-                                              kIOGeneralInterest,
-                                              BatteryCaseCurrentLimitChangeCallback,
-                                              upsDataRef,
-                                              &(upsDataRef->currentLimitNotification));
+        IOServiceAddInterestNotification(gNotifyPort,
+                                         accessoryManagerService,
+                                         kIOGeneralInterest,
+                                         BatteryCaseCurrentLimitChangeCallback,
+                                         upsDataRef,
+                                         &(upsDataRef->currentLimitNotification));
         
         // Set up notifications to send the battery case required charging voltage
         chargerService = IOServiceGetMatchingService(kIOMasterPortDefault,
                                                      IOServiceMatching("AppleARMPMUCharger"));
-        kr = IOServiceAddInterestNotification(gNotifyPort,
-                                              chargerService,
-                                              kIOGeneralInterest,
-                                              BatteryCaseRequiredVoltageChangeCallback,
-                                              upsDataRef,
-                                              &(upsDataRef->requiredVoltageNotification));
-
-        // Schedule wake-up to ensure we complete enumeration and don't get stuck in sleep
-        kr = scheduleRTCWake(chargerService, 15);
-
+        IOServiceAddInterestNotification(gNotifyPort,
+                                         chargerService,
+                                         kIOGeneralInterest,
+                                         BatteryCaseRequiredVoltageChangeCallback,
+                                         upsDataRef,
+                                         &(upsDataRef->requiredVoltageNotification));
     } else {
         // Disable USB and mask charging from the rest of the system
-        kr = IOAccessoryManagerSetUSBPowerIgnore(accessoryManagerConnect, true);
+        IOAccessoryManagerSetUSBPowerIgnore(accessoryManagerConnect, true);
+        IOAccessoryManagerSetUSBCurrentLimitBase(accessoryManagerConnect, 0);
         upsDataRef->hasACPower = false;
         
-        // Stop listening for changes in current limits, and revert to
-        // default of drawing 1A from an untethered battery case
+        // Battery cases always start enabled after removing AC power
+        upsDataRef->isBatteryCaseEnabled = true;
+        
+        // Stop listening for changes in current limits
         if (upsDataRef->currentLimitNotification != MACH_PORT_NULL) {
             IOObjectRelease(upsDataRef->currentLimitNotification);
             upsDataRef->currentLimitNotification = MACH_PORT_NULL;
@@ -1016,27 +1080,6 @@ void BatteryCaseHandleACStateChange(UPSDataRef upsDataRef, CFTypeRef powerState)
     IOServiceClose(accessoryManagerConnect);
 #endif
     // NOOP on OS X
-}
-
-int scheduleRTCWake(io_service_t chargerService, int deadlineSec)
-{
-    CFDictionaryRef  dict = NULL;
-    CFStringRef parameterNames[1];
-    CFTypeRef   parameterValues[1];
-    kern_return_t result=KERN_ABORTED;
-    parameterNames[0] = CFStringCreateWithCString( kCFAllocatorDefault, "RTCWakeImmediate", kCFStringEncodingUTF8 );
-    parameterValues[0] = CFNumberCreate( kCFAllocatorDefault, kCFNumberSInt32Type, &deadlineSec );
-    dict = CFDictionaryCreate( kCFAllocatorDefault,
-                              (const void **) &parameterNames[0],
-                              (const void **) &parameterValues[0],
-                              1,
-                              &kCFTypeDictionaryKeyCallBacks,
-                              &kCFTypeDictionaryValueCallBacks );
-    if (dict) {
-        result = IORegistryEntrySetCFProperties(chargerService, dict);
-        CFRelease(dict);
-    }
-    return result;
 }
 
 //---------------------------------------------------------------------------
@@ -1120,6 +1163,7 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
     CFNumberRef number = NULL;
     IOReturn result = kIOReturnSuccess;
     int elementValue = 0;
+    uint32_t psID = 0;
     char upsLabelString[kInternalUPSLabelLength];
     
     if (!upsDataRef || !properties || !capabilities)
@@ -1155,8 +1199,14 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSNameKey), upsName);
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), transport);
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsPresentKey), kCFBooleanTrue);
-        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
-        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSBatteryPowerValue));
+        if (upsDataRef->isUPS) {
+            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanTrue);
+            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSACPowerValue));
+        }
+        else {
+            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
+            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSBatteryPowerValue));
+        }
         if (vid) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSVendorIDKey), vid);
         }
@@ -1164,8 +1214,9 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSProductIDKey), pid);
         }
         
+        psID = MAKE_UNIQ_SOURCE_ID(getpid(), upsDataRef->upsID);
         number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                                &upsDataRef->upsID);
+                                &psID);
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceIDKey), number);
         CFRelease(number);
         
@@ -1296,7 +1347,7 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
 // This routine allow remote processes to issue commands to the UPS.  It is
 // expected that command will come in as a serialized CFDictionaryRef.
 //---------------------------------------------------------------------------
-kern_return_t _io_ups_send_command(mach_port_t server, int upsID,
+kern_return_t _io_ups_send_command(mach_port_t server, int srcId,
                                    void *commandBuffer, IOByteCount commandSize) {
     CFDictionaryRef	command;
     CFMutableDataRef data;
@@ -1307,11 +1358,11 @@ kern_return_t _io_ups_send_command(mach_port_t server, int upsID,
                                                kCFAllocatorDefault,
                                                kNilOptions, NULL);
     if (command) {
-        if (!gUPSDataArrayRef || (upsID >= CFArrayGetCount(gUPSDataArrayRef))) {
+        if (!gUPSDataArrayRef || (GET_UPSID(srcId) >= CFArrayGetCount(gUPSDataArrayRef))) {
             res = kIOReturnBadArgument;
         } else {
             data = (CFMutableDataRef)CFArrayGetValueAtIndex(gUPSDataArrayRef,
-                                                            upsID);
+                                                            GET_UPSID(srcId));
             upsDataRef =(UPSDataRef)CFDataGetMutableBytePtr(data);
             
             if (upsDataRef && upsDataRef->upsPlugInInterface)
@@ -1329,7 +1380,7 @@ kern_return_t _io_ups_send_command(mach_port_t server, int upsID,
 // This routine allow remote processes to issue commands to the UPS.  It will
 // return a CFDictionaryRef that is serialized.
 //---------------------------------------------------------------------------
-kern_return_t _io_ups_get_event( mach_port_t server, int upsID,
+kern_return_t _io_ups_get_event( mach_port_t server, int srcId,
                                 void **eventBufferPtr,
                                 IOByteCount *eventBufferSizePtr) {
     CFDictionaryRef	event;
@@ -1339,12 +1390,12 @@ kern_return_t _io_ups_get_event( mach_port_t server, int upsID,
     IOReturn res = kIOReturnError;
     
     if (!eventBufferPtr || !eventBufferSizePtr ||
-        !gUPSDataArrayRef || (upsID >= CFArrayGetCount(gUPSDataArrayRef))) {
+        !gUPSDataArrayRef || (GET_UPSID(srcId) >= CFArrayGetCount(gUPSDataArrayRef))) {
         
         return kIOReturnBadArgument;
     }
     
-    data = (CFMutableDataRef)CFArrayGetValueAtIndex(gUPSDataArrayRef, upsID);
+    data = (CFMutableDataRef)CFArrayGetValueAtIndex(gUPSDataArrayRef, GET_UPSID(srcId));
     upsDataRef = (UPSDataRef)CFDataGetMutableBytePtr(data);
     
     if (!upsDataRef || !upsDataRef->upsPlugInInterface)
@@ -1381,7 +1432,7 @@ kern_return_t _io_ups_get_event( mach_port_t server, int upsID,
 // This routine allow remote processes to issue commands to the UPS.  It will
 // return a CFSetRef that is serialized.
 //---------------------------------------------------------------------------
-kern_return_t _io_ups_get_capabilities(mach_port_t server, int upsID,
+kern_return_t _io_ups_get_capabilities(mach_port_t server, int srcId,
                                        void **capabilitiesBufferPtr,
                                        IOByteCount *capabilitiesBufferSizePtr) {
     CFSetRef capabilities;
@@ -1391,12 +1442,12 @@ kern_return_t _io_ups_get_capabilities(mach_port_t server, int upsID,
     IOReturn res = kIOReturnError;
     
     if (!capabilitiesBufferPtr || !capabilitiesBufferSizePtr ||
-        !gUPSDataArrayRef || (upsID >= CFArrayGetCount(gUPSDataArrayRef))) {
+        !gUPSDataArrayRef || (GET_UPSID(srcId) >= CFArrayGetCount(gUPSDataArrayRef))) {
         
         return kIOReturnBadArgument;
     }
     
-    data = (CFMutableDataRef)CFArrayGetValueAtIndex(gUPSDataArrayRef, upsID);
+    data = (CFMutableDataRef)CFArrayGetValueAtIndex(gUPSDataArrayRef, GET_UPSID(srcId));
     upsDataRef = (UPSDataRef)CFDataGetMutableBytePtr(data);
     
     if (!upsDataRef || !upsDataRef->upsPlugInInterface)
