@@ -37,6 +37,12 @@
 #include "PMConnection.h"
 #include "Platform.h"
 #include "powermanagementServer.h" // mig generated
+#include "adaptiveDisplay.h"
+#include "StandbyTimer.h"
+
+os_log_t    sysLoad_log = NULL;
+#undef   LOG_STREAM
+#define  LOG_STREAM   sysLoad_log
 
 static int minOfThree(int a, int b, int c);
 
@@ -72,9 +78,9 @@ static uint32_t thermalState            = kIOPMThermalWarningLevelNormal;
 static uint64_t thermalPressureLevel    = kOSThermalPressureLevelNominal;
 static int      tpl_supported           = 0;
 
-
 static UserActiveStruct gUserActive;
 
+__private_extern__ bool isDisplayAsleep( );
 /************************* ****************************** ********************/
 
 static uint32_t updateUserActivityLevels(void);
@@ -84,9 +90,6 @@ static void userActive_prime(void) {
 
     gUserActive.postedLevels = 0xFFFF; // bogus value
     userActiveHandleRootDomainActivity();
-#if TARGET_OS_EMBEDDED
-    gUserActive.rootDomain = true;
-#endif
 
 }
 
@@ -99,9 +102,7 @@ void userActiveHandleSleep(void)
     if (gUserActive.rootDomain) {
         gUserActive.sleepFromUserWakeTime = CFAbsoluteTimeGetCurrent();
     }
-#if !TARGET_OS_EMBEDDED
     gUserActive.rootDomain = false;
-#endif
 }
 
 void userActiveHandlePowerAssertionsChanged()
@@ -112,6 +113,7 @@ void userActiveHandlePowerAssertionsChanged()
 __private_extern__ void resetSessionUserActivity()
 {
     gUserActive.sessionUserActivity = false;
+    gUserActive.sessionActivityLevels = 0;
 }
 
 __private_extern__ uint32_t getSystemThermalState()
@@ -119,8 +121,15 @@ __private_extern__ uint32_t getSystemThermalState()
     return thermalState;
 }
 
-__private_extern__ bool getSessionUserActivity()
+/*
+ * getSessionUserActivity - returns rootDomain's activity state since 
+ * wake. Also returns all activityLevels set in this wake.
+ */
+__private_extern__ bool getSessionUserActivity(uint64_t *sessionLevels)
 {
+    if (sessionLevels) {
+        *sessionLevels = gUserActive.sessionActivityLevels;
+    }
     return gUserActive.sessionUserActivity;
 }
 
@@ -145,15 +154,21 @@ void userActiveHandleRootDomainActivity(void)
         // without any more HID activity, lastHid_ts won't change to true
         SystemLoadUserActiveAssertions(true);
     }
+    else {
+        gUserActive.rootDomain = false;
+    }
 
+    INFO_LOG("rootDomain's user activity state:%d\n", gUserActive.rootDomain);
     if (userIsActive) {
         CFRelease(userIsActive);
     }
+    evaluateADS();
+    evaluateAdaptiveStandby();
 }
 
 static uint32_t getUserInactiveDuration()
 {
-    uint64_t now = getMonotonicTime();
+    uint64_t now = getMonotonicContinuousTime();
 
     uint64_t hidInactivityDuration = 0;
     uint64_t assertionInactivityDuration = UINT64_MAX;
@@ -205,11 +220,6 @@ uint32_t updateUserActivityLevels(void)
         if (checkForActivesByType(kPreventDisplaySleepType) && !isA_NotificationDisplayWake()) {
             levels |= kIOPMUserPresentPassive;
         }
-#if TARGET_OS_EMBEDDED
-        if (!displayIsOff) {
-            levels |= kIOPMUserPresentPassive;
-        }
-#endif
 
     }
     if (checkForActivesByType(kNetworkAccessType)) {
@@ -229,8 +239,11 @@ uint32_t updateUserActivityLevels(void)
         notify_set_state(token, levels);
         notify_post("com.apple.system.powermanagement.useractivity2");
 
-        DEBUG_LOG("Activity changes from 0x%llx to 0x%llx. UseActiveState:%d\n",
+        INFO_LOG("Activity changes from 0x%llx to 0x%llx. UseActiveState:%d\n",
             gUserActive.postedLevels, levels, gUserActive.userActive);
+        INFO_LOG("hidActive:%d displayOff:%d assertionActivityValid:%d now:0x%llx  hid_ts:0x%llx assertion_ts:0x%llx\n",
+                gUserActive.hidActive, displayIsOff, gUserActive.assertionActivityValid,
+                getMonotonicContinuousTime(), gUserActive.lastHid_ts, gUserActive.lastAssertion_ts);
 
         if (((gUserActive.postedLevels & kIOPMUserNotificationActive) == 0) &&
             (levels & kIOPMUserNotificationActive)) {
@@ -251,6 +264,7 @@ uint32_t updateUserActivityLevels(void)
         }
 
         gUserActive.postedLevels = levels;
+        gUserActive.sessionActivityLevels |= levels;
     }
 
 
@@ -281,10 +295,6 @@ uint32_t updateUserActivityLevels(void)
                 // that prevent display sleep should not set kIOPMUserPresentPassiveWithDisplay.
                 displayAssertionsExist = checkForActivesByType(kPreventDisplaySleepType);
                 audioAssertionsExist = checkForAudioType();
-#if TARGET_OS_EMBEDDED
-                // audio assertions are used as proxy for display assertions on embedded.
-                displayAssertionsExist = audioAssertionsExist;
-#endif
                 if (displayAssertionsExist) {
                     levels |= (kIOPMUserPresentPassive|kIOPMUserPresentPassiveWithDisplay);
                 }
@@ -334,7 +344,6 @@ uint32_t updateUserActivityLevels(void)
  */
 static void updateUserActivityState(int state)
 {
-#if !TARGET_OS_EMBEDDED
 
     if (state != gUserActive.presentActive) {
        if (state) {
@@ -355,7 +364,6 @@ static void updateUserActivityState(int state)
        updateUserActivityLevels();
     }
 
-#endif
 
 }
 
@@ -408,13 +416,12 @@ static void shareTheSystemLoad(bool shouldNotify)
         if (thermalPressureLevel == kOSThermalPressureLevelNominal) {
             powerLevel = kIOSystemLoadAdvisoryLevelGreat;
         }
-        else if ((thermalPressureLevel == kOSThermalPressureLevelModerate) ||
-            (thermalPressureLevel == kOSThermalPressureLevelHeavy))
+        else if (thermalPressureLevel == kOSThermalPressureLevelModerate)
         {
             powerLevel = kIOSystemLoadAdvisoryLevelOK;
         }
         else {
-            // trapping or sleeping
+            // heavy or trapping or sleeping
             powerLevel = kIOSystemLoadAdvisoryLevelBad;
         }
     }
@@ -704,6 +711,7 @@ __private_extern__ void SystemLoad_prime(void)
     CFRunLoopSourceRef          rlser = 0;
     int                         token;
 
+    sysLoad_log = os_log_create(PM_LOG_SYSTEM, SYSLOAD_LOG);
     sysloadQ = dispatch_queue_create(sysload_qname, DISPATCH_QUEUE_SERIAL);
     userActive_prime();
 
@@ -730,9 +738,7 @@ __private_extern__ void SystemLoad_prime(void)
 
     SystemLoadPrefsHaveChanged();
 
-#if !TARGET_OS_EMBEDDED
     SystemLoadUserStateHasChanged();
-#endif
 
     SystemLoadCPUPowerHasChanged(NULL);
 
@@ -743,13 +749,14 @@ __private_extern__ void SystemLoad_prime(void)
 
     gUserActive.idleTimeout = kIOPMDefaultUserActivityTimeout;
 
-    gUserActive.lastHid_ts = getMonotonicTime();
+    gUserActive.lastHid_ts = getMonotonicContinuousTime();
     gUserActive.hidActive = true;
 
     gUserActive.lastAssertion_ts = 0;
     gUserActive.assertionActivityValid = false;
 
     registerForHidActivity();
+    displayIsOff = isDisplayAsleep();
 
 
 
@@ -783,6 +790,7 @@ __private_extern__ void SystemLoadDisplayPowerStateHasChanged(bool _displayIsOff
         // assertions created prior to display sleep
         gUserActive.assertionActivityValid = 0;
     }
+    INFO_LOG("Display state: %s\n", (displayIsOff ? "Off" : "On"));
 
     shareTheSystemLoad(kYesNotify);
     evaluateHidIdleNotification();
@@ -992,7 +1000,6 @@ exit:
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#if !TARGET_OS_EMBEDDED
 /* @function SystemLoadUserStateHasChanged
  * Populates:
  *  gUserActive.loggedIn
@@ -1021,7 +1028,6 @@ __private_extern__ void SystemLoadSystemPowerStateHasChanged(void)
 {
     shareTheSystemLoad(kYesNotify);
 }
-#endif /* !TARGET_OS_EMBEDDED */
 
 /*! SystemLoadUserActiveAssertions
  *  Called when new user-active assertion is created
@@ -1030,7 +1036,7 @@ static void setAssertionIdleNotificationTimer()
 {
     static dispatch_source_t assertionEval = 0;
     static bool assertionEvalSuspended = true;
-    uint64_t now = getMonotonicTime();
+    uint64_t now = getMonotonicContinuousTime();
 
     if (!gUserActive.lastAssertion_ts) {
         // Timer is not required if there are no assertions
@@ -1060,20 +1066,18 @@ static void setAssertionIdleNotificationTimer()
 
 __private_extern__ void SystemLoadUserActiveAssertions(bool active)
 {
-#if !TARGET_OS_EMBEDDED
 
     if (active) {
 
         // As there is no notification when assertion is released, we need to
         // post a timer to reset the assertion state
-        gUserActive.lastAssertion_ts = getMonotonicTime();
+        gUserActive.lastAssertion_ts = getMonotonicContinuousTime();
         setAssertionIdleNotificationTimer();
         gUserActive.assertionActivityValid = true;
     }
 
     evaluateHidIdleNotification( );
 
-#endif /* !TARGET_OS_EMBEDDED */
 }
 
 
@@ -1089,7 +1093,7 @@ static int minOfThree(int a, int b, int c)
 
 static void insertClient(clientInfo_t *client)
 {
-    clientInfo_t *iter, *prev;
+    clientInfo_t *iter, *prev = NULL;
 
     if (client->idleTimeout < kMinIdleTimeout) {
         ERROR_LOG("Invalid idleTimeout value %d\n", client->idleTimeout);
@@ -1129,6 +1133,7 @@ static void insertClient(clientInfo_t *client)
     evaluateHidIdleNotification( );
 
 }
+
 __private_extern__ void registerUserActivityClient(xpc_object_t connection, xpc_object_t msg)
 {
 
@@ -1212,10 +1217,29 @@ void updateUserActivityTimeout(xpc_object_t connection, xpc_object_t msg)
         return;
     }
 
-    // Insert bacj with new values
+    // Insert back with new values
     client->idleTimeout = (uint32_t)xpc_dictionary_get_uint64(msg, kUserActivityTimeoutKey);
     insertClient(client);
 
     DEBUG_LOG("Updated idleTimeout to %d for  user inactivity client %p(pid %d)\n",
                  client->idleTimeout, client->connection, xpc_connection_get_pid(connection));
+}
+
+__private_extern__ uint32_t getTimeSinceLastTickle( )
+{
+    __block uint64_t  hidActivity_ts;
+    dispatch_sync(sysloadQ, ^{
+        hidActivity_ts = monotonicTS2Secs(__IOHIDEventSystemClientCopyIntegerProperty(
+                CFSTR(kIOHIDLastActivityTimestampKey)));
+    });
+    uint64_t  currTime = getMonotonicContinuousTime();
+
+    if (hidActivity_ts > gUserActive.lastAssertion_ts) {
+        return (currTime > hidActivity_ts) ? (uint32_t)(currTime - hidActivity_ts) : 0;
+    }
+    else {
+        return (currTime > gUserActive.lastAssertion_ts) ? (uint32_t)(currTime - gUserActive.lastAssertion_ts) : 0;
+    }
+
+
 }

@@ -36,45 +36,16 @@
 #include "AutoWakeScheduler.h"
 #include "RepeatingAutoWake.h"
 #include "PMAssertions.h"
+#include <libproc.h>
 
 enum {                                                                                                                                         
     kIOPMMaxScheduledEntries = 1000                                                                                                            
 };
 
-#if TARGET_OS_EMBEDDED
-static CFAbsoluteTime        gMinScheduleTime = 5.0;
-#define MIN_SCHEDULE_TIME   (gMinScheduleTime)
-#else
 #define MIN_SCHEDULE_TIME   (0.0)
-#endif
 
 extern uint32_t gDebugFlags;
 
-typedef void (*powerEventCallout)(CFDictionaryRef);
-
-/* 
- * We use one PowerEventBehavior struct per-type of schedule power event 
- * sleep/wake/power/shutdown/wakeORpower/restart.
- * The struct contains special behavior per-type.
- */
-struct PowerEventBehavior {
-    // These values change to reflect the state of current 
-    // and upcoming power events
-    CFMutableArrayRef       array;
-    CFDictionaryRef         currentEvent;
-    CFRunLoopTimerRef       timer;
-
-    CFStringRef             title;
-
-    // wake and poweron sharedEvents pointer points to wakeorpoweron struct
-    struct PowerEventBehavior      *sharedEvents;
-
-    // Callouts will be defined at startup time and not modified after that
-    powerEventCallout       timerExpirationCallout;    
-    powerEventCallout       scheduleNextCallout;
-    powerEventCallout       noScheduledEventCallout;
-};
-typedef struct PowerEventBehavior PowerEventBehavior;
 
 /*
  * Global structs tracking behaviors & current state
@@ -525,7 +496,7 @@ static void print_sched(PowerEventBehavior *b)
  * getWakeScheduleTime - Returns the absolute time when this event's wake will
  * be scheduled, taking leeway into account
  */
-static CFAbsoluteTime getWakeScheduleTime(CFDictionaryRef event)
+__private_extern__ CFAbsoluteTime getWakeScheduleTime(CFDictionaryRef event)
 {
 
     CFAbsoluteTime      wakeup_abs = 0;
@@ -549,7 +520,43 @@ static CFAbsoluteTime getWakeScheduleTime(CFDictionaryRef event)
     return (wakeup_abs + leeway_secs);
 }
 
-__private_extern__ CFTimeInterval getEarliestRequestAutoWake(void)
+__private_extern__ CFDictionaryRef copyEarliestShutdownRestartEvent(void)
+{
+    CFDictionaryRef     eventShutdown = NULL;
+    CFDictionaryRef     eventRestart = NULL;
+    CFAbsoluteTime      timeShutdown = 0;
+    CFAbsoluteTime      timeRestart = 0;
+
+    
+    eventShutdown=copyEarliestEvent(&shutdownBehavior);
+    eventRestart=copyEarliestEvent(&restartBehavior);
+
+    if (eventShutdown && eventRestart)
+    {
+        timeShutdown = getWakeScheduleTime(eventShutdown);
+        timeRestart = getWakeScheduleTime(eventRestart);
+        if  (timeShutdown < timeRestart)
+        {
+            CFRelease(eventRestart);
+            return eventShutdown;
+        }
+        else
+        {
+            CFRelease(eventShutdown);
+            return eventRestart;
+        }
+        
+    }
+    
+    if (eventShutdown)
+        return eventShutdown;
+    return eventRestart;
+}
+__private_extern__ CFDictionaryRef copyEarliestRequestAutoWakeEvent(void)
+{
+    return copyEarliestEvent(&wakeBehavior);
+}
+__private_extern__ CFDictionaryRef copyEarliestEvent(PowerEventBehavior  *behave)
 {
     CFIndex             cnt, i;
     CFArrayRef          arr = NULL;
@@ -557,10 +564,11 @@ __private_extern__ CFTimeInterval getEarliestRequestAutoWake(void)
     CFDictionaryRef     one_event = NULL;
     CFDictionaryRef     event = NULL;
     CFDictionaryRef     repeat_event = NULL;
-    PowerEventBehavior  *behave = &wakeBehavior;
     CFAbsoluteTime      now = CFAbsoluteTimeGetCurrent();
     CFAbsoluteTime      one_event_ts = 0;
     CFAbsoluteTime      wakeup_abs = 0;
+    CFDictionaryRef     selected_event = NULL;
+    
     
     // wake and poweron types get merged with wakeorpoweron array
     if(behave->sharedEvents) {
@@ -584,8 +592,7 @@ __private_extern__ CFTimeInterval getEarliestRequestAutoWake(void)
             one_event_ts = wakeup_abs;
         }
     }
-
-#if !TARGET_OS_EMBEDDED
+    
     repeat_event = copyNextRepeatingEvent(behave->title);
     if (repeat_event)
     {
@@ -596,19 +603,42 @@ __private_extern__ CFTimeInterval getEarliestRequestAutoWake(void)
             one_event = repeat_event;
         }
     }
-#endif
 
 
     //print_sched(&wakeBehavior);
     if (gDebugFlags & kIOPMDebugLogWakeRequests) {
         print_one("Selected",  one_event);
     }
-
+    
+    //copy the event
+    if (one_event)
+    {
+        selected_event = CFDictionaryCreateCopy(NULL,one_event);
+    }
+    
     if (repeat_event)
+    {
         CFRelease(repeat_event);
+    }
 
     if(arr && behave->sharedEvents) CFRelease(arr);
 
+    return selected_event;
+}
+
+__private_extern__ CFTimeInterval getEarliestRequestAutoWake(void)
+{
+    
+    CFDictionaryRef     event = NULL;
+    CFAbsoluteTime      one_event_ts = 0;
+    
+    event=copyEarliestRequestAutoWakeEvent();
+    if (event)
+    {
+        one_event_ts = getWakeScheduleTime(event);
+        CFRelease(event);
+    }
+    
     return one_event_ts;
 }
 
@@ -644,7 +674,6 @@ void poweronScheduleCallout(CFDictionaryRef event)
 void wakeTimerExpiredCallout(CFDictionaryRef event __unused)
 {
 
-#if !TARGET_OS_EMBEDDED
     CFMutableDictionaryRef assertionDescription = NULL;
 
     assertionDescription = _IOPMAssertionDescriptionCreate(
@@ -656,7 +685,6 @@ void wakeTimerExpiredCallout(CFDictionaryRef event __unused)
     InternalCreateAssertion(assertionDescription, NULL);
 
     CFRelease(assertionDescription);
-#endif
 
 
 }
@@ -798,7 +826,6 @@ purgePastEvents(PowerEventBehavior  *behave)
 static void
 copyScheduledPowerChangeArrays(void)
 {
-#if !TARGET_OS_EMBEDDED
     CFArrayRef              tmp;
     SCPreferencesRef        prefs;
     PowerEventBehavior      *this_behavior;
@@ -833,7 +860,6 @@ copyScheduledPowerChangeArrays(void)
 
     CFRelease(prefs);
 
-#endif
 }
 
 /*
@@ -995,7 +1021,6 @@ createSCSession(SCPreferencesRef *prefs, uid_t euid, int lock)
 {
     IOReturn ret = kIOReturnSuccess;
 
-#if !TARGET_OS_EMBEDDED
 
     if (euid == 0)
         *prefs = SCPreferencesCreate( 0, CFSTR("PM-configd-AutoWake"),
@@ -1022,7 +1047,6 @@ createSCSession(SCPreferencesRef *prefs, uid_t euid, int lock)
 
 
 exit:
-#endif
     return ret;
 }
 
@@ -1030,12 +1054,10 @@ __private_extern__ void
 destroySCSession(SCPreferencesRef prefs, int unlock)
 {
 
-#if !TARGET_OS_EMBEDDED
     if (prefs) {
         if(unlock) SCPreferencesUnlock(prefs); 
         CFRelease(prefs);
     }
-#endif
 }
 
 static void
@@ -1068,7 +1090,6 @@ static IOReturn
 updateToDisk(SCPreferencesRef prefs, PowerEventBehavior  *behavior, CFStringRef type)  
 {
     IOReturn ret = kIOReturnSuccess;
-#if !TARGET_OS_EMBEDDED
 
     if(!SCPreferencesSetValue(prefs, type, behavior->array)) 
     {
@@ -1087,7 +1108,6 @@ updateToDisk(SCPreferencesRef prefs, PowerEventBehavior  *behavior, CFStringRef 
         goto exit;
     }
 exit:
-#endif
     return ret;
 }
 
@@ -1212,17 +1232,22 @@ _io_pm_schedule_power_event
 )
 {
 
-    CFDictionaryRef     event = NULL;
-    CFDataRef           dataRef = NULL;
-    CFStringRef         type = NULL;
-    SCPreferencesRef    prefs = 0;
-    uid_t               callerEUID;
-    int                 i;
-
-
+    CFMutableDictionaryRef  event = NULL;
+    CFDataRef               dataRef = NULL;
+    CFStringRef             type = NULL;
+    SCPreferencesRef        prefs = 0;
+    uid_t                   callerEUID;
+    pid_t                   callerPID;
+    int                     i;
+    
+    
     *return_code = kIOReturnSuccess;
 
-    audit_token_to_au32(token, NULL, &callerEUID, NULL, NULL, NULL, NULL, NULL, NULL);
+    audit_token_to_au32(token, NULL, &callerEUID, NULL, NULL, NULL, &callerPID, NULL, NULL);
+    if (auditTokenHasEntitlement(token, kIOPMWakeRequestEntitlement)) {
+        callerEUID = 0;
+    }
+    
 
     if (activeEventCnt >= kIOPMMaxScheduledEntries) {
         *return_code = kIOReturnNoSpace;
@@ -1238,14 +1263,41 @@ _io_pm_schedule_power_event
     }
     dataRef = CFDataCreate(0, (const UInt8 *)flatPackage, packageLen);
     if (dataRef) {
-        event = (CFDictionaryRef)CFPropertyListCreateWithData(0, dataRef, 0, NULL, NULL); 
+        event = (CFMutableDictionaryRef)CFPropertyListCreateWithData(0, dataRef, kCFPropertyListMutableContainers, NULL, NULL);
+        
     }
 
     if (!event) {
         *return_code = kIOReturnBadArgument;
         goto exit;
     }
-
+    
+    CFStringRef appName = CFDictionaryGetValue(event, CFSTR(kIOPMPowerEventAppNameKey));
+    if (!appName || !isA_CFString(appName) || CFEqual(appName, CFSTR("")))
+    {
+        /* Tag the process name */
+        char    appBuf[MAXPATHLEN];
+        int     len = proc_name(callerPID, appBuf, MAXPATHLEN);
+        if (0 != len)
+        {
+            appName = CFStringCreateWithCString(0, appBuf, kCFStringEncodingMacRoman);
+            
+            if (appName)
+            {
+                CFDictionarySetValue(event, CFSTR(kIOPMPowerEventAppNameKey),   appName);
+                CFRelease(appName);
+            }
+        }
+    }
+    /* Tag the PID */
+    CFNumberRef  appPID = NULL;
+    appPID = CFNumberCreate(0, kCFNumberIntType, &callerPID);
+    
+    if (appPID) {
+        CFDictionarySetValue(event, CFSTR(kIOPMPowerEventAppPIDKey), appPID);
+        CFRelease(appPID);
+    }
+    
     type = CFDictionaryGetValue(event, CFSTR(kIOPMPowerEventTypeKey) );
     if (!type) {
         *return_code = kIOReturnBadArgument;

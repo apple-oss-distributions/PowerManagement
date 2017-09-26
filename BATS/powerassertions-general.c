@@ -31,6 +31,7 @@ static void test_IOPMCopyAssertionActivityAggregate();
 static void test_assertionExceptions();
 static void test_IOPMPerformBlockWithAssertion();
 static void test_sysQualifiers();
+static void testUserActivityAssertion();
 
 int gPassCnt = 0, gFailCnt = 0;
 
@@ -38,11 +39,6 @@ int gPassCnt = 0, gFailCnt = 0;
 #define kSystemMaxAssertionsAllowed 64
 #define kKnownGoodAssertionType     CFSTR("NoDisplaySleepAssertion")
 
-
-#define INT_TO_CFNUMBER(numRef, val) { \
-    int __n = (val);  \
-    numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &__n); \
-}
 
 int main()
 {
@@ -75,6 +71,7 @@ int main()
     test_assertionExceptions();
     test_IOPMPerformBlockWithAssertion();
     test_sysQualifiers();
+    testUserActivityAssertion();
 
     dispatch_main();
     return 0;
@@ -139,10 +136,6 @@ static void populateAssertionForTestingStruct(void)
 
     if (editedAssertionsStatus) {
         CFDictionaryRemoveValue(editedAssertionsStatus, kIOPMAssertionTypeEnableIdleSleep);
-#if TARGET_OS_EMBEDDED
-        CFDictionaryRemoveValue(editedAssertionsStatus, kIOPMAssertDisplayWake);
-        CFDictionaryRemoveValue(editedAssertionsStatus, kIOPMAssertAwakeReservePower);
-#endif
 
         assertions.allCount = CFDictionaryGetCount(editedAssertionsStatus);
 
@@ -179,6 +172,8 @@ static void populateAssertionForTestingStruct(void)
 
             CFRelease(tmp);
         }
+
+        CFRelease(editedAssertionsStatus);
     }
 
     if (!assertions.all || !assertions.supported) {
@@ -312,7 +307,7 @@ static void assertAllAtOnce(void)
 {
     IOReturn ret;
 
-    bzero(assertions.idArray, sizeof(assertions.idArray));
+    bzero(assertions.idArray, assertions.allCount * sizeof(*assertions.idArray));
     START_TEST_CASE("Test creating multiple assertions\n");
     LOG("Creating all %ld assertions simultaneously, then releasing them.\n", assertions.allCount);
 
@@ -389,7 +384,7 @@ static void assertBogusNames(void)
     START_TEST_CASE("Test Creating assertions with long names\n");
 
     LOG("Creating %d assertions with long names.\n", kLongNamesCount);
-    bzero(assertions.idArray, sizeof(assertions.idArray));
+    bzero(assertions.idArray, assertions.allCount * sizeof(*assertions.idArray));
 
     for (int i=0; i<kLongNamesCount; i++)
     {
@@ -568,17 +563,21 @@ exit:
  */
 static IOReturn checkForAssertion(CFDictionaryRef assertionsDict, IOPMAssertionID id, pid_t pid)
 {
+    IOReturn rc = kIOReturnSuccess;
     CFIndex i;
     CFNumberRef pidCF = NULL;
+
     if (!isA_CFDictionary(assertionsDict)) {
         FAIL("assertionsDict passed to checkForAssertion() is invalid\n");
-        return kIOReturnBadArgument;
+        rc = kIOReturnBadArgument;
+        goto exit;
     }
 
     pidCF = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &pid);
     if (!isA_CFNumber(pidCF)) {
         FAIL("assertionsDict failed to create CFNumber for pid %d\n", pid);
-        return kIOReturnError;
+        rc = kIOReturnError;
+        goto exit;
     }
 
     CFArrayRef pidAssertions = CFDictionaryGetValue(assertionsDict, pidCF);
@@ -599,10 +598,14 @@ static IOReturn checkForAssertion(CFDictionaryRef assertionsDict, IOPMAssertionI
 
     if (i >= CFArrayGetCount(pidAssertions)) {
         FAIL("Assertion with id 0x%x is not found in assertion Dictionary\n", id);
-        return kIOReturnError;
+        rc = kIOReturnError;
+    }
+exit:
+    if (pidCF) {
+        CFRelease(pidCF);
     }
 
-    return kIOReturnSuccess;
+    return rc;
 }
 
 
@@ -629,7 +632,7 @@ static void assertionOnOff(void)
         return;
     }
 
-    if (copyAssertionProperty(kIOPMAssertionTypePreventUserIdleSystemSleep, id, kIOPMAssertionNameKey) != NULL) {
+    if ((nameInProps = copyAssertionProperty(kIOPMAssertionTypePreventUserIdleSystemSleep, id, kIOPMAssertionNameKey)) != NULL) {
         FAIL("assertOnOff: Assertion detail is unexpected when it is off\n");
         goto exit;
     }
@@ -640,7 +643,7 @@ static void assertionOnOff(void)
         FAIL("assertOnOff: Failed to set the assertion level property. ret:0x%x\n", ret);
         goto exit;
     }
-    CFRelease(numRef);
+    CFRelease(numRef); numRef = NULL;
 
     nameInProps = copyAssertionProperty(kIOPMAssertionTypePreventUserIdleSystemSleep, id, kIOPMAssertionNameKey);
     if ((nameInProps == NULL) || (CFStringCompare(name, nameInProps, 0) != kCFCompareEqualTo)) {
@@ -661,7 +664,7 @@ static void assertionOnOff(void)
         FAIL("assertOnOff: Failed to set the assertion level property. ret:0x%x\n", ret);
         goto exit;
     }
-    CFRelease(numRef);
+    CFRelease(numRef); numRef = NULL;
 
     // Check and make sure IOPMCopyInactiveAssertionsByProcess returns this assertion
     ret = IOPMCopyInactiveAssertionsByProcess(&assertionsDict);
@@ -682,7 +685,7 @@ static void assertionOnOff(void)
         FAIL("assertOnOff: Failed to set the assertion level property. ret:0x%x\n", ret);
         goto exit;
     }
-    CFRelease(numRef);
+    CFRelease(numRef); numRef = NULL;
 
     // The new backtrace must be different from the previous one
     backtrace2 = copyAssertionProperty(kIOPMAssertionTypePreventUserIdleSystemSleep, id, kIOPMAssertionCreatorBacktrace);
@@ -713,6 +716,9 @@ static void assertionOnOff(void)
     PASS("AssertOnOff test\n");
 
 exit:
+    if (numRef) {
+        CFRelease(numRef);
+    }
     if (id) {
         IOPMAssertionRelease(id);
     }
@@ -879,10 +885,14 @@ static void test_IOPMCopyAssertionActivityAggregate()
         CFRelease(delta);
         if (basis) CFRelease(basis);
         basis = update;
+        update = NULL;
     }
 
     PASS("IOPMSetAssertionActivityAggregate\n");
 exit:
+
+    if (basis) CFRelease(basis);
+    if (update) CFRelease(update);
     IOPMSetAssertionActivityAggregate(false);
 }
 
@@ -957,15 +967,6 @@ void toggleExternalPower(bool disable)
 {
     int rc = -1;
 
-#if TARGET_OS_EMBEDDED
-    pid_t pid;
-    if (disable) {
-        rc = posix_spawn(&pid, "/usr/local/bin/accctl", NULL, NULL, (char *[]){"/usr/local/bin/accctl", "usbcurrent", "base","0", NULL}, NULL);
-    }
-    else {
-        rc = posix_spawn(&pid, "/usr/local/bin/accctl", NULL, NULL, (char *[]){"/usr/local/bin/accctl", "usbcurrent", "base", NULL}, NULL);
-    }
-#endif
 
     if (rc!=0) {
         printf("Failed to turn %s the external power source\n", disable ? "off" : "on");
@@ -1210,6 +1211,48 @@ exit:
     }
     if (props) {
         CFRelease(props);
+    }
+    return;
+}
+
+static void testUserActivityAssertion()
+{
+    START_TEST_CASE("Test creating UserActivity assertion\n");
+    IOReturn rc;
+    IOPMAssertionID id;
+
+    CFMutableDictionaryRef properties = CFDictionaryCreateMutable(0, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (!properties)
+    {
+        FAIL("CFDictionaryCreateMutable failed\n");
+        goto exit;
+    }
+    CFNumberRef assertionTimeout;
+    INT_TO_CFNUMBER(assertionTimeout, 30);
+    if ( assertionTimeout != nil )
+    {
+        CFDictionarySetValue(properties, kIOPMAssertionTimeoutKey, assertionTimeout);
+        CFDictionarySetValue(properties, kIOPMAssertionTimeoutActionKey, kIOPMAssertionTimeoutActionRelease);
+        CFRelease(assertionTimeout);
+    }
+    CFDictionarySetValue(properties, kIOPMAssertionTypeKey, kIOPMAssertionUserIsActive);
+    CFDictionarySetValue(properties, kIOPMAssertionNameKey, CFSTR("Testing User activity assertion"));
+    CFDictionarySetValue(properties, kIOPMAssertionAppliesOnLidClose, kCFBooleanTrue);
+
+    rc = IOPMAssertionCreateWithProperties(properties, &id);
+    if ( rc != kIOReturnSuccess )
+    {
+        FAIL("IOPMAssertionDeclareUserActivity returned 0x%x\n", rc);
+        goto exit;
+    }
+
+    sleep(30);
+    IOPMAssertionRelease(id);
+
+    PASS("UserActivity assertion\n");
+exit:
+    if (properties) {
+        CFRelease(properties);
     }
     return;
 }
