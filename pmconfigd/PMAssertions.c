@@ -78,7 +78,6 @@ os_log_t    assertions_log = NULL;
  */
 #define kPMMaxDisplayTurnOffDelay  (5)
 
-static uint32_t     kDisplayTickleDelay = 30;  //secs
 
 // Globals
 
@@ -313,6 +312,7 @@ void asyncAssertionProperties(xpc_object_t remoteConnection, xpc_object_t msg)
     CFTypeRef           cfObj;
     xpc_object_t        msgDictionary;
     CFDictionaryRef     newAssertionProperties = NULL;
+    audit_token_t       token;
 
     msgDictionary = xpc_dictionary_get_value(msg, kAssertionPropertiesMsg);
     if (!msgDictionary) {
@@ -326,6 +326,13 @@ void asyncAssertionProperties(xpc_object_t remoteConnection, xpc_object_t msg)
         rc = kIOReturnBadArgument;
         goto exit;
     }
+#ifndef XCTEST
+    xpc_connection_get_audit_token(remoteConnection, &token);
+    if (!callerIsEntitledToAssertion(token, newAssertionProperties)) {
+        rc = kIOReturnNotPrivileged;
+        goto exit;
+    }
+#endif
 
     cfObj = CFDictionaryGetValue(newAssertionProperties, kIOPMAssertionIdKey);
     if (isA_CFNumber(cfObj)) {
@@ -687,15 +694,22 @@ kern_return_t _io_pm_assertion_set_properties (
         *return_code = kIOReturnBadArgument;
         goto exit;
     }
+    if (!callerIsEntitledToAssertion(token, setProperties))
+    {
+        *return_code = kIOReturnNotPrivileged;
+        goto exit;
+    }
 
     *return_code = doSetProperties(callerPID, assertion_id, setProperties, enTrIntensity);
     if (*return_code == kIOReturnSuccess) {
         updateAppSleepStates(processInfoGet(callerPID), disableAppSleep, enableAppSleep);
     }
 
-    CFRelease(setProperties);
 
 exit:
+    if (setProperties) {
+        CFRelease(setProperties);
+    }
     vm_deallocate(mach_task_self(), props, propsCnt);
 
     return KERN_SUCCESS;
@@ -943,8 +957,9 @@ __private_extern__ void sendActivityTickle ()
     SystemLoadUserActiveAssertions(true);
 
     if (((currTime - lastTickle_ts) < kDisplayTickleDelay) &&
-            (!isDisplayAsleep())){
-        DEBUG_LOG("Avoiding display tickle\n");
+            (!isDisplayAsleep()) && (userActiveRootDomain())){
+        DEBUG_LOG("Avoiding display tickle. cTime:%lld lTime:%lld Display:%d rd:%d\n",
+                currTime, lastTickle_ts, isDisplayAsleep(), userActiveRootDomain());
         return;
     }
 
@@ -1302,6 +1317,31 @@ __private_extern__ IOReturn InternalReleaseAssertionSync(IOPMAssertionID outID)
     return ret;
 }
 
+__private_extern__ IOReturn InternalSetAssertionTimeout(IOPMAssertionID id, CFTimeInterval timeout)
+{
+    CFMutableDictionaryRef          dict = NULL;
+    IOReturn                        rc = kIOReturnError;
+
+    if (!id)
+        return kIOReturnBadArgument;
+
+    CFNumberRef timeout_num = CFNumberCreate(0, kCFNumberDoubleType, &timeout);
+    if (!timeout_num) {
+        return kIOReturnError;
+    }
+
+    if ((dict = CFDictionaryCreateMutable(0, 0,
+                                          &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)))
+    {
+        CFDictionarySetValue(dict, kIOPMAssertionTimeoutKey, timeout_num);
+        rc = doSetProperties(getpid(), id, dict, NULL);
+        CFRelease(dict);
+    }
+    CFRelease(timeout_num);
+
+    return rc;
+
+}
 
 static IOReturn _localCreateAssertion(CFStringRef type, CFStringRef name, IOPMAssertionID *outID)
 {
@@ -1734,14 +1774,43 @@ static bool callerIsEntitledToAssertion(
     CFStringRef         assert_type = NULL;
     bool                caller_is_allowed = true;
     int                 idx = -1;
+    CFTypeRef           value = NULL;
+    pid_t               callerPID = -1;
 
+    audit_token_to_au32(token, NULL, NULL, NULL, NULL, NULL, &callerPID, NULL, NULL);
+
+    // Check entitlement for assertion type
     assert_type = CFDictionaryGetValue(newAssertionProperties, kIOPMAssertionTypeKey);
     idx = getAssertionTypeIndex(assert_type);
-    if ( (idx < 0) || (gAssertionTypes[idx].entitlement == NULL))
-        return true;
+    if ((idx >= 0) && (gAssertionTypes[idx].entitlement != NULL))  {
+        caller_is_allowed = auditTokenHasEntitlement(token, gAssertionTypes[idx].entitlement);
 
-    caller_is_allowed = auditTokenHasEntitlement(token, gAssertionTypes[idx].entitlement);
+        if (!caller_is_allowed) {
+            ERROR_LOG("Pid %d is not privileged to create assertion type %@\n", callerPID, assert_type);
+            return false;
+        }
+    }
 
+    // Check entitlement for assertion properties
+    value = CFDictionaryGetValue(newAssertionProperties, kIOPMAssertionAppliesToLimitedPowerKey);
+    if (isA_CFBoolean(value) && (value == kCFBooleanTrue)) {
+        caller_is_allowed = auditTokenHasEntitlement(token, kIOPMAssertOnBatteryEntitlement);
+
+        if (!caller_is_allowed) {
+            ERROR_LOG("Pid %d is not privileged to set property %@\n", callerPID, kIOPMAssertionAppliesToLimitedPowerKey);
+            return false;
+        }
+    }
+
+    value = CFDictionaryGetValue(newAssertionProperties, kIOPMAssertionAppliesOnLidClose);
+    if (isA_CFBoolean(value) && (value == kCFBooleanTrue)) {
+        caller_is_allowed = auditTokenHasEntitlement(token, kIOPMAssertOnLidCloseEntitlement);
+
+        if (!caller_is_allowed) {
+            ERROR_LOG("Pid %d is not privileged to set property %@\n", callerPID, kIOPMAssertionAppliesOnLidClose);
+            return false;
+        }
+    }
     return caller_is_allowed;
 }
 
@@ -1799,7 +1868,7 @@ static void checkProcAggregates( )
                     notify_set_state(token, (((uint64_t)kIOPMAssertionAggregateException << 32)) | pid);
                     notify_post(kIOPMAssertionExceptionNotifyName);
                     notify_cancel(token);
-                    DEBUG_LOG("Aggregate assertion exception on pid %llu.\n", pid);
+                    INFO_LOG("Aggregate assertion exception on pid %llu.\n", pid);
                 }
 
            }
@@ -2026,7 +2095,7 @@ void handleProcAssertionTimeout(pid_t pid, IOPMAssertionID id)
         notify_set_state(token, (((uint64_t)kIOPMAssertionDurationException << 32)) | pid);
         notify_post(kIOPMAssertionExceptionNotifyName);
         notify_cancel(token);
-        DEBUG_LOG("Single assertion exception on pid %d. Assertion details: %@\n", pid, assertion->props);
+        INFO_LOG("Single assertion exception on pid %d. Assertion details: %@\n", pid, assertion->props);
     }
 
 
@@ -2436,6 +2505,12 @@ kern_return_t _io_pm_declare_system_active (
         *return_code = kIOReturnBadArgument;
         goto exit;
     }
+
+    if (!callerIsEntitledToAssertion(token, assertionProperties))
+    {
+        *return_code = kIOReturnNotPrivileged;
+        goto exit;
+    }
     *system_state = kIOPMSystemSleepNotReverted;
     *return_code = kIOReturnSuccess;
 
@@ -2518,6 +2593,11 @@ kern_return_t  _io_pm_declare_user_active (
         goto exit;
     }
 
+    if (!callerIsEntitledToAssertion(token, assertionProperties))
+    {
+        *return_code = kIOReturnNotPrivileged;
+        goto exit;
+    }
     /* Set the assertion timeout value to display sleep timer value, if it is not 0 */
 
     displaySleepTimerSecs = gDisplaySleepTimer * 60; /* Convert to secs */
@@ -2612,6 +2692,11 @@ kern_return_t  _io_pm_declare_network_client_active (
         goto exit;
     }
 
+    if (!callerIsEntitledToAssertion(token, assertionProperties))
+    {
+        *return_code = kIOReturnNotPrivileged;
+        goto exit;
+    }
     /* Set the assertion timeout value to idle sleep timer value, if it is not 0 */
 
     idleSleepTimerSecs = gIdleSleepTimer * 60; /* Convert to secs */
@@ -2965,12 +3050,10 @@ kern_return_t  _io_pm_set_exception_limits (
     CFIndex  cnt;
 
     // Check the caller's entitlement 
-#if 0
-    if (auditTokenHasEntitlement(token, CFSTR("com.apple.private.iokit.powerlogging")))  {
+    if (!auditTokenHasEntitlement(token, CFSTR("com.apple.private.iokit.powerlogging")))  {
         *return_code =  kIOReturnNotPrivileged;
         goto exit;
     }
-#endif
 
     unfolder = CFDataCreateWithBytesNoCopy(0, (const UInt8 *)props, propsCnt, kCFAllocatorNull);
     if (unfolder) {
@@ -3638,6 +3721,13 @@ static void forwardPropertiesToAssertion(const void *key, const void *value, voi
             assertion->mods |= kAssertionModLidState;
         }
     }
+    else if (CFEqual(key, kIOPMAssertionExitSilentRunning)) {
+        if (!isA_CFBoolean(value)) return;
+        if ((value == kCFBooleanTrue) && !(assertion->state & kAssertionExitSilentRunningMode)) {
+            assertion->state |= kAssertionExitSilentRunningMode;
+            assertion->mods |= kAssertionModSilentRunning;
+        }
+    }
     else if (CFEqual(key, kIOPMAssertionTypeKey)) {
         /* Assertion type can't be modified */
         return;
@@ -3786,6 +3876,12 @@ static IOReturn doSetProperties(pid_t pid,
 
     }
 
+    if ( (assertion->mods & kAssertionModSilentRunning) &&
+         (assertType->handler) )
+    {
+        (*assertType->handler)(assertType, kAssertionOpEval);
+
+    }
     if (assertion->mods & kAssertionModResources) {
         updateSystemQualifiers(assertion, kAssertionOpEval);
     }
@@ -4146,8 +4242,10 @@ void setKernelAssertions(assertionType_t *assertType, assertionOps op)
          * to unclamp SilentRunning through AppleSMC
          */
         if ( ((assertType->kassert == kPreventSleepType) || (assertType->kassert == kNetworkAccessType))
-             && activesForTheType)
+             && activesForTheType) {
             _unclamp_silent_running(true);
+            setVMDarkwakeMode(false);
+        }
         /*
          * if already raised with kernel or if there are no active ones,
          * nothing to do
@@ -4225,9 +4323,9 @@ static void displayWakeHandler(assertionType_t *assertType, assertionOps op)
     }
     else { // op == kAssertionOpEval
         if (activeExists) {
-            if (assertionLevel)
-                return;
             level = 1;
+            if (assertionLevel)
+                goto check_silentRunning;
         }
         else {
             if (!assertionLevel)
@@ -4258,6 +4356,22 @@ static void displayWakeHandler(assertionType_t *assertType, assertionOps op)
                         NULL, NULL, NULL);
 
     if (gAggChange) notify_post( kIOPMAssertionsChangedNotifyString );
+
+check_silentRunning:
+    if (level && isInSilentRunningMode()) {
+        __block bool userActive = false;
+        applyToAllAssertionsSync(assertType, false, ^(assertion_t *assertion){
+            if (assertion->state & kAssertionExitSilentRunningMode) {
+                INFO_LOG("Assertion with id:%lld has ExitSilentRunning mode flag set. Exiting silent running mode.\n",
+                         (((uint64_t)assertion->kassert) << 32) | (assertion->assertionId));
+                userActive = true;
+                return;
+            }
+        });
+        if (userActive) {
+            _unclamp_silent_running(true);
+        }
+    }
 }
 #endif
 
@@ -4433,6 +4547,14 @@ static IOReturn raiseAssertion(assertion_t *assertion)
         val = CFDictionaryGetValue(assertion->props, kIOPMAssertionAppliesToLimitedPowerKey);
         if (isA_CFBoolean(val) && (val == kCFBooleanTrue)) {
             assertion->state |= kAssertionStateValidOnBatt;
+        }
+    }
+
+    if (assertion->kassert == kTicklessDisplayWakeType) {
+        CFBooleanRef userActive = kCFBooleanFalse;
+        if (CFDictionaryGetValueIfPresent(assertion->props, kIOPMAssertionExitSilentRunning, (const void **)&userActive)
+                && (userActive == kCFBooleanTrue)) {
+            assertion->state |= kAssertionExitSilentRunningMode;
         }
     }
 
@@ -5212,7 +5334,7 @@ __private_extern__ void configAssertionType(kerAssertionType idx, bool initialCo
                         assertType->disableCnt--;
                     prevBTdisable = false;
                 }
-                assertType->flags |= kAssertionTypeLogOnCreate;
+                assertType->flags &= ~kAssertionTypeLogOnCreate;
             }
             newEffect = kPrevDemandSlpEffect;
         }

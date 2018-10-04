@@ -92,6 +92,9 @@ do {    \
 #define kIOPMRootDomainWakeTypeNotification CFSTR("Notification")
 #endif
 
+
+#define  kDisplayTickleDelay  30        // Mininum delay(in secs) between sending tickles
+
 /*
  * Lower 16 bits are used for assertionID created by powerd.
  * Upper 16 bits are used for assertionID created by the client process creating
@@ -272,6 +275,7 @@ typedef struct assertion {
 #define kAssertionStateLogged               0x040
 #define kAssertionStateAddsToProcStats      0x080
 #define kAssertionProcTimerActive           0x100
+#define kAssertionExitSilentRunningMode     0x200
 
 /* Mods bits for assertion_t structure */
 #define kAssertionModTimer              0x1
@@ -281,6 +285,7 @@ typedef struct assertion {
 #define kAssertionModLidState           0x10
 #define kAssertionModName               0x20
 #define kAssertionModResources          0x40
+#define kAssertionModSilentRunning      0x80
 
 typedef enum {
     kAssertionOpRaise,
@@ -421,6 +426,7 @@ __private_extern__ void InternalReleaseAssertion(
 __private_extern__ IOReturn InternalReleaseAssertionSync(IOPMAssertionID outID);
 __private_extern__ IOReturn 
 InternalCreateAssertionWithTimeout(CFStringRef type, CFStringRef name, int timerSecs, IOPMAssertionID *outID);
+__private_extern__ IOReturn InternalSetAssertionTimeout(IOPMAssertionID id, CFTimeInterval timeout);
 
 __private_extern__ void InternalEvaluateAssertions(void);
 

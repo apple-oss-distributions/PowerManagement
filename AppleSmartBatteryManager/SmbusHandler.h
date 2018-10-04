@@ -29,16 +29,22 @@ private:
     int         fExternalTransactionWait;
     
     AppleSmartBatteryManager    *fMgr;
+    IOWorkLoop                  *fWorkLoop;
 
     ASBMgrTransactionCompletion     fCompletion;
     bool                            fFullyDischarged;
     OSObject                        *fTarget;
     void                            *fReference;
     IOSMBusTransaction              fTransaction;
+    ASBMgrOpType                    fOpType;
+    uint32_t                        fCmdCount;
+
     IOACPIPlatformDevice            *fACPIProvider;
 
     void smbusCompletion(void *ref, IOSMBusTransaction *transaction);
     void smbusExternalTransactionCompletion(void *ref, IOSMBusTransaction *transaction);
+    IOReturn getErrorCode(IOSMBusStatus status);
+
 public:
 
     IOReturn initialize ( AppleSmartBatteryManager *mgr );

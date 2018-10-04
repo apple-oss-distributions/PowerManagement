@@ -26,7 +26,6 @@
 
 #include <IOKit/IOService.h>
 
-#include <IOKit/smc/AppleSMCFamily.h>
 #include <IOKit/smbus/IOSMBusController.h>
 #include "SmbusHandler.h"
 #include <os/log.h>
@@ -44,8 +43,8 @@ class AppleSMC;
 extern uint32_t gBMDebugFlags;
 extern bool gDebugAllowed;
 enum {
-    BM_LOG_LEVEL0 = 0x00000001,     // basic logging for completions and errors
-    BM_LOG_LEVEL1 = 0x00000002,     // log individual transactions
+    BM_LOG_LEVEL0 = 0x00000001,     // basic logging for errors
+    BM_LOG_LEVEL1 = 0x00000002,     // basic logging
     BM_LOG_LEVEL2 = 0x00000004,     // verbose logging
 };
 
@@ -113,8 +112,8 @@ public:
 
     // transactionCompletion is the guts of the state machine
     bool    transactionCompletion(void *ref, IOSMBusTransaction *transaction);
-    IOReturn inhibitChargingGated(int level);
-    IOReturn disableInflowGated(int level);
+    IOReturn inhibitChargingGated(uint64_t level);
+    IOReturn disableInflowGated(uint64_t level);
     
 private:
     // Called by AppleSmartBatteryManagerUserClient
@@ -142,16 +141,12 @@ private:
 
     IOReturn performSmbusTransactionGated(ASBMgrRequest *req, OSObject *target, void *ref);
     IOReturn smbusCompletionHandler(void *ref, IOReturn status, size_t byteCount, uint8_t *data);
-    IOReturn smbusCompletionHandlerGated(ASBMgrTransactionCompletion *completion, OSObject **target, void **ref);
-
-    IOReturn performExternalTransactionGated(void *in,  void *out, IOByteCount inSize, IOByteCount *outSize);
-
+    IOReturn requestExclusiveSMBusAccessGated(bool request);
 
     
 private:
     IOSMBusController           * fProvider;
     SmbusHandler                * fSmbus;
-    bool                        fSmbusCommandInProgress;
     ASBMgrTransactionCompletion fAsbmCompletion;
     OSObject                    *fAsbmTarget;
     void                        *fAsbmReference;
@@ -161,6 +156,7 @@ private:
     bool                        fSystemSleeping;
     bool                        fInacessible;
     IOWorkLoop                  *fWorkLoop;
+
 };
 
 #endif

@@ -54,6 +54,8 @@ __private_extern__ void PMSettingsPrefsHaveChanged(void);
 
 __private_extern__ void PMSettingsPSChange(void);
 
+__private_extern__ bool GetSystemPowerSettingBool(CFStringRef);
+
 __private_extern__ bool GetPMSettingBool(CFStringRef);
 
 __private_extern__ IOReturn GetPMSettingNumber(CFStringRef which, int64_t *value);
@@ -72,9 +74,17 @@ __private_extern__ IOReturn getIdleSleepTimer(unsigned long *idleSleepTimer);
 __private_extern__ void setDisplaySleepFactor(unsigned int factor);
 __private_extern__ void setDisplayToDimTimer(io_connect_t connection, unsigned int minutesToDim);
 
+__private_extern__ void saveAlarmInfo(CFDictionaryRef info);
+__private_extern__ CFDictionaryRef copyAlarmInfo();
+
 __private_extern__ bool _DWBT_allowed(void);
 __private_extern__ bool _DWBT_enabled(void);
 
 __private_extern__ bool _SS_allowed(void);
+
+#ifdef XCTEST
+void xctSetPowerNapState(bool allowDBT, bool allowSS);
+void xctSetEnergySettings(CFDictionaryRef settings);
+#endif
 
 #endif //_PMSettings_h_

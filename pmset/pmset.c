@@ -83,7 +83,8 @@
 // Settings options
 #define ARG_DIM             "dim"
 #define ARG_DISPLAYSLEEP    "displaysleep"
-#define ARG_ADAPTIVEDISPLAY "adaptivedisplay"
+#define ARG_PROXIMITYWAKE   "proximitywake"
+#define ARG_PROXIMITYDISPLAY   "proximitydisplay"
 #define ARG_ADAPTIVESTANDBY "adaptivestandby"
 #define ARG_SLEEP           "sleep"
 #define ARG_SPINDOWN        "spindown"
@@ -111,6 +112,8 @@
 #define ARG_NETAVAILABLE    "networkoversleep"
 #define ARG_DEEPSLEEP       "standby"
 #define ARG_DEEPSLEEPDELAY  "standbydelay"
+#define ARG_DEEPSLEEPDELAYLOW  "standbydelaylow"
+#define ARG_DEEPSLEEPDELAYHIGH "standbydelayhigh"
 #define ARG_DARKWAKES       "darkwakes"
 #define ARG_POWERNAP        "powernap"
 #define ARG_RESTOREDEFAULTS "restoredefaults"
@@ -291,14 +294,16 @@ PMFeature all_features[] =
     { kIOPMMobileMotionModuleKey,   ARG_MOTIONSENSOR },
     { kIOPMGPUSwitchKey,            ARG_GPU },
     { kIOPMDeepSleepEnabledKey,     ARG_DEEPSLEEP },
-    { kIOPMDeepSleepDelayKey,       ARG_DEEPSLEEPDELAY },
+    { kIOPMDeepSleepDelayHighKey,   ARG_DEEPSLEEPDELAYHIGH },
+    { kIOPMDeepSleepDelayKey,       ARG_DEEPSLEEPDELAYLOW },
     { kIOPMDarkWakeBackgroundTaskKey, ARG_POWERNAP },
     { kIOPMTTYSPreventSleepKey,     ARG_TTYKEEPAWAKE },
     { kIOHibernateModeKey,          ARG_HIBERNATEMODE },
     { kIOHibernateFileKey,          ARG_HIBERNATEFILE },
     { kIOPMAutoPowerOffEnabledKey,  ARG_AUTOPOWEROFF },
     { kIOPMTCPKeepAlivePrefKey,     ARG_TCPKEEPALIVE },
-    { kIOPMAutoPowerOffDelayKey,    ARG_AUTOPOWEROFFDELAY }     
+    { kIOPMAutoPowerOffDelayKey,    ARG_AUTOPOWEROFFDELAY },
+    { kIOPMProximityDarkWakeKey,    ARG_PROXIMITYWAKE },
 };
 
 #define kNUM_PM_FEATURES    (sizeof(all_features)/sizeof(PMFeature))
@@ -3997,7 +4002,7 @@ static void show_thermal_cpu_power_level(void)
     }
 
     print_pretty_date(CFAbsoluteTimeGetCurrent(), false);
-    fprintf(stderr, "CPU Power notify\n"), fflush(stderr);        
+    printf("CPU Power notify\n");
     
     count = CFDictionaryGetCount(cpuStatus);
     keys = (CFStringRef *)malloc(count*sizeof(CFStringRef));
@@ -5197,6 +5202,18 @@ static int parseArgs(int argc,
                 }
                 modified |= kModSettings;
                 i+=2;
+            } else if(0 == strncmp(argv[i], ARG_PROXIMITYWAKE, kMaxArgStringLength))
+            {
+                if(-1 == checkAndSetIntValue( argv[i+1],
+                                                CFSTR(kIOPMProximityDarkWakeKey),
+                                                apply, false, kNoMultiplier,
+                                                ac, battery, ups))
+                {
+                    ret = kParseBadArgs;
+                    goto exit;
+                }
+                modified |= kModSettings;
+                i+=2;
             } else if( (0 == strncmp(argv[i], ARG_SPINDOWN, kMaxArgStringLength)) ||
                        (0 == strncmp(argv[i], ARG_DISKSLEEP, kMaxArgStringLength)))
             {
@@ -5389,7 +5406,9 @@ static int parseArgs(int argc,
                     CFDictionarySetValue( local_system_power_settings, 
                                           CFSTR(kIOPMDestroyFVKeyOnStandbyKey), 
                                           val ? kCFBooleanTrue : kCFBooleanFalse );
-    
+                    if (val != 0) {
+                        printf("Setting %s to True. When system enters standby with this key set all maintenance wakes and powernap activities are disabled\n",ARG_DISABLEFDEKEYSTORE);
+                    }
                     modified |= kModSystemSettings;
                 }
                 i+=2;
@@ -5510,7 +5529,32 @@ static int parseArgs(int argc,
                 i+=2;
             } else if(0 == strncmp(argv[i], ARG_DEEPSLEEPDELAY, kMaxArgStringLength))
             {
-                if(-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMDeepSleepDelayKey), 
+                if((-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMDeepSleepDelayKey),
+                                              apply, false, kNoMultiplier,
+                                              ac, battery, ups)) ||
+                    (-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMDeepSleepDelayHighKey),
+                                               apply, false, kNoMultiplier,
+                                               ac, battery, ups)))
+                {
+                    ret = kParseBadArgs;
+                    goto exit;
+                }
+                modified |= kModSettings;
+                i+=2;
+            } else if(0 == strncmp(argv[i], ARG_DEEPSLEEPDELAYHIGH, kMaxArgStringLength))
+            {
+                if(-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMDeepSleepDelayHighKey),
+                                             apply, false, kNoMultiplier,
+                                             ac, battery, ups))
+                {
+                    ret = kParseBadArgs;
+                    goto exit;
+                }
+                modified |= kModSettings;
+                i+=2;
+            } else if(0 == strncmp(argv[i], ARG_DEEPSLEEPDELAYLOW, kMaxArgStringLength))
+            {
+                if(-1 == checkAndSetIntValue(argv[i+1], CFSTR(kIOPMDeepSleepDelayKey),
                                              apply, false, kNoMultiplier,
                                              ac, battery, ups))
                 {
@@ -6177,10 +6221,14 @@ static void printSleepWakeMsg(asl_object_t m, int logType)
     
 }
 
+#define kFilterDurationInSec (7 * 24 * 60 * 60)
+
 /* All PM messages in ASL log */
 static void show_log(char **argv)
 {
     asl_object_t        response = NULL;
+    asl_object_t        filtered_response = NULL;
+    bool                filter_logs = true;
     bool                json = false;
     char                *store = kPMASLStorePath;
 
@@ -6188,23 +6236,51 @@ static void show_log(char **argv)
         if (!strcmp(argv[0],"-json")) {
             json = true;
         }
+        else if (!strcmp(argv[0], "-all")) {
+            filter_logs = false;
+        }
         else if ((!strcmp(argv[0], "-f")) && argv[1]) {
             store = argv[1];
         }
     }
+
     response = open_pm_asl_store(store);
+
     if (!response) {
         printf("Error - no messages found in PM ASL data store at: %s\n", store);
         return;
     } else
         printf("PM ASL data store: %s\n", store);
-    
-    if (json) {
-        show_log_json(response);
+
+    if (filter_logs){
+        char         timestr[20] = {'\0'};
+        asl_object_t cq = asl_new(ASL_TYPE_QUERY);
+
+        if (cq == NULL) {
+            printf("Error - unable to create query filter for PM ASL data store at: %s\n", store);
+            return;
+        }
+        unsigned long long duration_sec = ((unsigned long long)CFAbsoluteTimeGetCurrent()) +
+            kCFAbsoluteTimeIntervalSince1970 - kFilterDurationInSec;
+        snprintf(timestr, sizeof(timestr), "%llu", duration_sec);
+
+        asl_set_query(cq, ASL_KEY_TIME, timestr, ASL_QUERY_OP_GREATER_EQUAL);
+        filtered_response = asl_search(response, cq);
+        asl_release(cq);
     }
     else {
-        show_log_text(response);
+        /* Use the query response without filtering */
+        filtered_response = response;
     }
+
+    if (json) {
+        show_log_json(filtered_response);
+    }
+    else {
+        show_log_text(filtered_response);
+    }
+
+    asl_release(filtered_response);
     return;
 }
 

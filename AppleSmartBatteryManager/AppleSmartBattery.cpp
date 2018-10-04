@@ -25,7 +25,7 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
-#include <IOKit/pwr_mgt/IOPMPrivate.h>
+#include <IOKit/IONVRAM.h>
 #include <libkern/c++/OSObject.h>
 #include <kern/clock.h>
 #include "AppleSmartBatteryManager.h"
@@ -73,6 +73,18 @@ do { \
 
 
 
+#define kIOReportNumberOfReporters  2
+#define kReportCategoryBattery (kIOReportCategoryPower | kIOReportCategoryField | kIOReportCategoryPeripheral | kIOReportCategoryDebug)
+#define kIOReportBatteryCycleCountID IOREPORT_MAKEID('c', 'y', 'c', 'l', 'e', 'c', 'n', 't')
+#define kIOReportBatteryGroupName "Battery"
+
+enum {
+    INDUCTIVE_FW_CTRL_CMD_SET_CLOAK               = 0x7,
+    INDUCTIVE_FW_CTRL_CMD_DISABLE_DEBUGPOWER      = 0x20,
+    INDUCTIVE_FW_CTRL_CMD_DISABLE_DISP_COEX       = 0x25,
+    INDUCTIVE_FW_CTRL_CMD_SET_DEMO_MODE           = 0x28,
+};
+
 // Keys we use to publish battery state in our IOPMPowerSource::properties array
 // TODO: All of these would need to exist on iOS/gOS?
 static const OSSymbol *_MaxErrSym               = OSSymbol::withCString(kIOPMPSMaxErrKey);
@@ -96,6 +108,23 @@ static const OSSymbol *_PermanentFailureSym     = OSSymbol::withCString(kErrorPe
 static const OSSymbol *_FullyCharged            = OSSymbol::withCString(kIOPMFullyChargedKey);
 static const OSSymbol *_SerialNumberSym         = OSSymbol::withCString("FirmwareSerialNumber");
 static const OSSymbol *_HardwareSerialSym       = OSSymbol::withCString("BatterySerialNumber");
+static const OSSymbol *_kChargingCurrent        = OSSymbol::withCString("ChargingCurrent");
+static const OSSymbol *_kChargingVoltage        = OSSymbol::withCString("ChargingVoltage");
+static const OSSymbol *_kChargerData            = OSSymbol::withCString("ChargerData");
+static const OSSymbol *_kNotChargingReason      = OSSymbol::withCString("NotChargingReason");
+static const OSSymbol *_RawCurrentCapacity      = OSSymbol::withCString("AppleRawCurrentCapacity");
+static const OSSymbol *_RawMaxCapacity          = OSSymbol::withCString("AppleRawMaxCapacity");
+static const OSSymbol *_kPassedCharge           = OSSymbol::withCString("PassedCharge");
+static const OSSymbol *_kBatteryFCCData         = OSSymbol::withCString("BatteryFCCData");
+static const OSSymbol *_kResScale               = OSSymbol::withCString("ResScale");
+static const OSSymbol *_kDOD0                   = OSSymbol::withCString("DOD0");
+static const OSSymbol *_kDOD1                   = OSSymbol::withCString("DOD1");
+static const OSSymbol *_kDOD2                   = OSSymbol::withCString("DOD2");
+static const OSSymbol *_QmaxCell                = OSSymbol::withCString("QmaxCell0");
+static const OSSymbol *_QmaxCell1               = OSSymbol::withCString("QmaxCell1");
+static const OSSymbol *_QmaxCell2               = OSSymbol::withCString("QmaxCell2");
+static const OSSymbol *_stateOfCharge           = OSSymbol::withCString("StateOfCharge");
+static const OSSymbol *_BatteryData             = OSSymbol::withCString("BatteryData");
 
 
 
@@ -155,7 +184,6 @@ bool AppleSmartBattery::init(void)
  * AppleSmartBattery::start
  *
  ******************************************************************************/
-
 bool AppleSmartBattery::start(IOService *provider)
 {
     fProvider = OSDynamicCast(AppleSmartBatteryManager, provider);
@@ -216,9 +244,6 @@ bool AppleSmartBattery::start(IOService *provider)
     // zero out battery state with argument (do_update == true)
     clearBatteryState(false);
 
-
-
-
     // Kick off the 30 second timer and do an initial poll
     // No guarantee SMC is ready at this point
     pollBatteryState(kBoot);
@@ -238,6 +263,9 @@ void AppleSmartBattery::initializeCommands(void)
     {
         // cmd,                    address, opType, smcKey, symbol
         {kTransactionRestart,       0,     kASBMInvalidOp,     0, 0, NULL,                      kUserVis},
+        {kChargerDataCmd,           kBatt, kASBMSMCReadDictionary,   0, 0, NULL,                kUserVis},
+        {kBatteryFCCDataCmd,        kBatt, kASBMSMCReadDictionary,   0, 0, NULL,                kUserVis},
+        {kBatteryDataCmd,           kBatt, kASBMSMCReadDictionary,   0, 0, NULL,                kUserVis},
         {kMStateContCmd,            kMgr,  kASBMSMBUSReadWord, 0, 0, NULL,                      kUserVis},
         {kMStateCmd,                kMgr,  kASBMSMBUSReadWord, 0, 0, NULL,                      kUserVis},
         {kBBatteryStatusCmd,        kBatt, kASBMSMBUSReadWord, 0, 0, NULL,                      kUserVis},
@@ -300,35 +328,37 @@ CommandStruct *AppleSmartBattery::commandForState(uint32_t state)
  * AppleSmartBattery::initiateTransaction
  *
  ******************************************************************************/
+bool AppleSmartBattery::doInitiateTransaction(const CommandStruct *cs)
+{
+    ASBMgrRequest req;
+
+    req.opType = cs->opType;
+    req.address = cs->addr;
+    req.command = cs->cmd;
+    req.fullyDischarged = fFullyDischarged;
+    req.completionHandler = OSMemberFunctionCast(ASBMgrTransactionCompletion,
+            this, &AppleSmartBattery::transactionCompletion);
+
+
+    return fProvider->performTransaction(&req, (OSObject *)this, (void *)cs);
+}
+
 bool AppleSmartBattery::initiateTransaction(const CommandStruct *cs)
 {
     uint32_t cmd = cs->cmd;
 
-    if (cmd == kFinishPolling)
-    {
+    if (cmd == kFinishPolling) {
         this->handlePollingFinished(true);
+        return true;
     }
-    else {
-        IOReturn ret;
-        ASBMgrRequest req;
-        
-        req.opType = cs->opType;
-        req.address = cs->addr;
-        req.command = cs->cmd;
-        req.fullyDischarged = fFullyDischarged;
-        req.completionHandler = OSMemberFunctionCast(ASBMgrTransactionCompletion, 
-                this, &AppleSmartBattery::transactionCompletion);
-        
-        
-        ret = fProvider->performTransaction(&req, (OSObject *)this, (void *)(uintptr_t)cmd);
-    
-        if (ret != kIOReturnSuccess) {
-            BM_ERRLOG("Command 0x%x failed with error 0x%x\n", cmd, ret);
-        }
+    ret = doInitiateTransaction(cs);
+    if (ret != kIOReturnSuccess) {
+        BM_ERRLOG("Command 0x%x failed with error 0x%x\n", cmd, ret);
     }
-    
-    return true;
+
+    return ret;
 }
+
 
 /******************************************************************************
  * AppleSmartBattery::initiateNextTransaction
@@ -402,9 +432,6 @@ IOReturn AppleSmartBattery::handleSystemSleepWake(
         {
             fPowerServiceToAck = powerService;
             fPowerServiceToAck->retain();
-            if (fBatteryReadAllTimer) {
-                fBatteryReadAllTimer->cancelTimeout();
-            }
             ret = (kBatteryReadAllTimeout * 1000);
         }
     }
@@ -431,6 +458,10 @@ void AppleSmartBattery::acknowledgeSystemSleepWake(void)
         fPowerServiceToAck->acknowledgeSetPowerState();
         fPowerServiceToAck->release();
         fPowerServiceToAck = 0;
+
+        if (fBatteryReadAllTimer) {
+            fBatteryReadAllTimer->cancelTimeout();
+        }
 
         BM_LOG1("SmartBattery: final acknowledge of wake after reading all regs\n");
     }
@@ -468,15 +499,14 @@ bool AppleSmartBattery::pollBatteryState(int type)
     else if (type != kUseLastPath) {
         fMachinePath = type;
     }
-    
+
     if (fInitialPollCountdown > 0) {
         // We're going out of our way to make sure that we get a successfull
         // initial poll at boot. Upgrade all early boot polls to kBoot.
         fMachinePath = kBoot;
     }
-    
-    if (!fPollingNow)
-    {
+
+    if (!fPollingNow) {
         BM_LOG1("Starting poll type %d\n", fMachinePath);
         /* Start the battery polling state machine (resetting it if it's already in progress) */
         transactionCompletion((void *)kTransactionRestart, 0, 0, NULL);
@@ -493,6 +523,8 @@ bool AppleSmartBattery::pollBatteryState(int type)
 
 void AppleSmartBattery::handleBatteryInserted(void)
 {
+    if (!fWorkLoop) return;
+
     if (!fWorkLoop->inGate()) {
         fWorkLoop->runAction(
                 OSMemberFunctionCast(IOWorkLoop::Action, this,
@@ -510,6 +542,8 @@ void AppleSmartBattery::handleBatteryInserted(void)
 
 void AppleSmartBattery::handleBatteryRemoved(void)
 {
+
+    if (!fWorkLoop) return;
 
     if (!fWorkLoop->inGate()) {
         fWorkLoop->runAction(
@@ -574,6 +608,9 @@ void AppleSmartBattery::handleSetOverrideCapacity(uint16_t value, bool sticky)
     }
     if (sticky) {
         fCapacityOverride = true;
+        BM_LOG1("Capacity override is set to true\n");
+    } else {
+        fCapacityOverride = false;
     }
 
     setCurrentCapacity(value);
@@ -589,6 +626,7 @@ void AppleSmartBattery::handleSwitchToTrueCapacity(void)
     }
 
     fCapacityOverride = false;
+    BM_LOG1("Capacity override is set to false\n");
     return;
 }
 
@@ -612,7 +650,7 @@ void AppleSmartBattery::incompleteReadTimeOut(void)
      *  Quit after kIncompleteReadRetryMax
      */
     handlePollingFinished(false);
-    if (0 < fIncompleteReadRetries)
+    if (!fSystemSleeping && (0 < fIncompleteReadRetries))
     {
         fIncompleteReadRetries--;
         pollBatteryState(kUseLastPath);
@@ -746,11 +784,23 @@ bool AppleSmartBattery::handleSetItAndForgetIt(int state, int val, const uint8_t
 void AppleSmartBattery::transactionCompletion(void *ref, IOReturn status, IOByteCount inCount, uint8_t *inData)
 {
     bool            transaction_success = (status == kIOReturnSuccess);
-    int             next_state = (int)(uintptr_t)ref;
+    uint32_t        next_state = kTransactionRestart;
     uint32_t        val = 0;
     OSNumber        *num = NULL;
-    uint32_t        cmd = (uint32_t)(uintptr_t)ref;
+    CommandStruct * cs = (CommandStruct *)ref;
+    uint32_t        cmd = kTransactionRestart;
+    uint32_t        smcKey = 0;
+    static unsigned int txnFailures;
     
+
+    if (!fWorkLoop->inGate()) {
+        fWorkLoop->runAction(
+                OSMemberFunctionCast(IOWorkLoop::Action, this, &AppleSmartBattery::transactionCompletion),
+                this, ref, VOIDPTR(status), VOIDPTR(inCount), VOIDPTR(inData));
+        return;
+    }
+
+
 
     if (fCancelPolling) {
         goto abort;
@@ -761,9 +811,21 @@ void AppleSmartBattery::transactionCompletion(void *ref, IOReturn status, IOByte
         goto abort;
     }
 
+    if (cs) {
+        next_state = cmd = cs->cmd;
+        smcKey = cs->smcKey;
+    }
+
     if (cmd) {
         if (transaction_success) {
-            val = (inData[1] << 8) | inData[0];
+            switch (inCount) {
+            case 2:
+                val = (inData[1] << 8) | inData[0];
+                break;
+            default:
+                break;
+            }
+
             BM_LOG1("Command 0x%x completed. inCount: %llu data:0x%x", cmd, inCount, val);
             if (handleSetItAndForgetIt(cmd, val, inData, inCount)) {
                 goto exit;
@@ -776,7 +838,7 @@ void AppleSmartBattery::transactionCompletion(void *ref, IOReturn status, IOByte
     if (!cmd || fRebootPolling)
     {
         // NULL cmd means we should start the state machine from scratch.
-        next_state = kTransactionRestart;
+        cmd = next_state = kTransactionRestart;
         fRebootPolling = false;
         BM_LOG1("Restarting poll type %d\n", fMachinePath);
     }
@@ -939,8 +1001,16 @@ void AppleSmartBattery::transactionCompletion(void *ref, IOReturn status, IOByte
 
         fRemainingCapacity = val;
 
-        if (!fCapacityOverride)
+        if (!fCapacityOverride) {
             setCurrentCapacity(val);
+        }
+        else {
+            BM_LOG1("Capacity override is true\n");
+        }
+
+#if TARGET_OS_OSX
+        SET_INTEGER_IN_PROPERTIES(_RawCurrentCapacity, val, 2);
+#endif
 
         if (!fPermanentFailure && (0 == fRemainingCapacity))
         {
@@ -954,9 +1024,16 @@ void AppleSmartBattery::transactionCompletion(void *ref, IOReturn status, IOByte
 
         fFullChargeCapacity = val;
 
-        if (!fMaxCapacityOverride) {
+        if (!fCapacityOverride) {
             setMaxCapacity(val);
         }
+        else {
+            BM_LOG1("Capacity override is true\n");
+        }
+
+#if TARGET_OS_OSX
+        SET_INTEGER_IN_PROPERTIES(_RawMaxCapacity, val, 2);
+#endif
 
         break;
 
@@ -1048,6 +1125,11 @@ void AppleSmartBattery::transactionCompletion(void *ref, IOReturn status, IOByte
     }
 
 exit:
+    if (txnFailures > 5) {
+        BM_ERRLOG("Too many transaction errors, abort poll\n");
+        goto abort;
+    }
+
     /* Kick off the next transaction */
     if (kFinishPolling != next_state) {
         this->initiateNextTransaction(next_state);
@@ -1062,6 +1144,13 @@ abort:
 
 void AppleSmartBattery::clearBatteryState(bool do_update)
 {
+    if (!fWorkLoop->inGate()) {
+        fWorkLoop->runAction(
+                OSMemberFunctionCast(IOWorkLoop::Action, this, &AppleSmartBattery::clearBatteryState),
+                this, VOIDPTR(do_update));
+        return;
+    }
+
     // Only clear out battery state; don't clear manager state like AC Power.
     // We just zero out the int and bool values, but remove the OSType values.
 
@@ -1117,6 +1206,13 @@ void AppleSmartBattery::clearBatteryState(bool do_update)
 
  void AppleSmartBattery::rebuildLegacyIOBatteryInfo(void)
  {
+    if (!fWorkLoop->inGate()) {
+        fWorkLoop->runAction(
+                OSMemberFunctionCast(IOWorkLoop::Action, this, &AppleSmartBattery::rebuildLegacyIOBatteryInfo),
+                this);
+        return;
+    }
+
     OSDictionary        *legacyDict = OSDictionary::withCapacity(5);
     uint32_t            flags = 0;
     OSNumber            *flags_num = NULL;
