@@ -193,8 +193,16 @@ __private_extern__ io_registry_entry_t getRootDomain(void)
     return gRoot;
 }
 
+__private_extern__ io_registry_entry_t getIOPMPowerSource(void)
+{
+    static io_registry_entry_t ps = MACH_PORT_NULL;
 
+    if (ps == MACH_PORT_NULL) {
+        ps = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPMPowerSource"));
+    }
 
+    return ps;
+}
 
 /*****************************************************************************/
 /*****************************************************************************/
@@ -239,3 +247,93 @@ __private_extern__  asl_object_t open_pm_asl_store(char *store)
     return response;
 }
 
+uint64_t CFAbsoluteTimeToMachAbsoluteTime(CFAbsoluteTime absoluteTime)
+{
+    uint64_t absolute;
+    struct timespec date;
+    kern_return_t result = mach_get_times(&absolute, NULL, &date);
+    if (result != KERN_SUCCESS) {
+        ERROR_LOG("Unable to get times: %i", result);
+        return 0;
+    }
+
+    // Convert the date to a CFAbsoluteTime
+    CFAbsoluteTime now = (date.tv_sec - kCFAbsoluteTimeIntervalSince1970) + date.tv_nsec / (CFTimeInterval)NSEC_PER_SEC;
+
+    // Figure out the difference between the date we got and the date we were passed in.
+    CFTimeInterval secondsBetweenInputAndNow = now - absoluteTime;
+
+    mach_timebase_info_data_t timebaseInfo;
+    mach_timebase_info(&timebaseInfo);
+    
+    uint64_t absoluteTimeIntervalBetweenInputAndNow = secondsBetweenInputAndNow * (CFTimeInterval)NSEC_PER_SEC * (timebaseInfo.denom / timebaseInfo.numer);
+    // back up the absolute time we got by this interval
+    uint64_t inputInAbsoluteTime = absolute - absoluteTimeIntervalBetweenInputAndNow;
+
+    return inputInAbsoluteTime;
+}
+
+uint64_t intervalInNanoseconds(uint64_t start, uint64_t end)
+{
+    // interval between two mach absolute timestamps
+    mach_timebase_info_data_t timebaseInfo;
+    mach_timebase_info(&timebaseInfo);
+    uint64_t elapsedNano = (end - start) * timebaseInfo.numer / timebaseInfo.denom;
+    return elapsedNano;
+
+}
+
+// smc shutdown cause
+// we are only interested in normal shutdown, power button shutdown
+// and shutdown due to thermal or battery reasons
+SMCShutdownCause all_causes[] =
+{
+    { "Battery disconnected",               0},
+    { "Normal warm reset",                  1},
+    { "Power supply disconnected",          2},
+    { "Power button pressed for > 4 sec",   3},
+    { "Software initiated shutdown",        5},
+    { "Normal shutdown by SOC",             7},
+    { "Battery fully drained",              -60},
+    { "Thermal shutdown for overtemp",      -81},
+};
+
+
+const char * smcShutdownCauseString(int shutdownCause) {
+    int num_codes = sizeof(all_causes)/sizeof(SMCShutdownCause);
+    for (int i = 0; i < num_codes; i++){
+        if (all_causes[i].shutdownCause == shutdownCause)
+            return all_causes[i].shutdownCauseString;
+    }
+    return "";
+}
+
+const char * descriptiveKernelAssertions(uint32_t val) {
+
+    const char *string = "";
+    if (val&kIOPMDriverAssertionCPUBit) {
+        string = "CPU";
+    }
+    if (val&kIOPMDriverAssertionUSBExternalDeviceBit) {
+        string = "USB";
+    }
+    if (val&kIOPMDriverAssertionBluetoothHIDDevicePairedBit) {
+        string = "BT-HID";
+    }
+    if (val&kIOPMDriverAssertionExternalMediaMountedBit) {
+        string = "MEDIA";
+    }
+    if (val&kIOPMDriverAssertionReservedBit5) {
+        string = "THNDR";
+    }
+    if (val&kIOPMDriverAssertionPreventDisplaySleepBit) {
+        string = "DSPLY";
+    }
+    if (val&kIOPMDriverAssertionReservedBit7) {
+        string = "STORAGE";
+    }
+    if (val&kIOPMDriverAssertionMagicPacketWakeEnabledBit) {
+        string = "MAGICWAKE";
+    }
+    return string;
+}

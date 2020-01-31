@@ -27,8 +27,10 @@
 #include <IOKit/IOService.h>
 #include <IOKit/pwr_mgt/IOPMPowerSource.h>
 #include <IOKit/IOReporter.h>
+#if TARGET_OS_OSX
 #include <IOKit/smbus/IOSMBusController.h>
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
+#endif
 
 
 #include "AppleSmartBatteryCommands.h"
@@ -36,7 +38,6 @@
 
 #define kBatteryPollingDebugKey     "BatteryPollingPeriodOverride"
 
-class AppleBatteryAuth;
 class AppleSmartBatteryManager;
 
 typedef struct {
@@ -65,12 +66,12 @@ typedef struct {
     const OSSymbol    *regKey;
     SMCKey      key;
     int32_t     byteCnt;
+    int pathBits;
 } smcToRegistry;
 
 
 class AppleSmartBattery : public IOPMPowerSource {
     OSDeclareDefaultStructors(AppleSmartBattery)
-    
 protected:
     AppleSmartBatteryManager    *fProvider;
     IOWorkLoop                  *fWorkLoop;
@@ -87,7 +88,7 @@ protected:
     uint16_t                    fFullChargeCapacity;
     bool                        fCapacityOverride;
     bool                        fMaxCapacityOverride;
-    
+
     uint8_t                     fInitialPollCountdown;
     uint8_t                     fIncompleteReadRetries;
 
@@ -101,17 +102,12 @@ protected:
     int                         fBatteryPresent;
     int                         fACConnected;
     int                         fInstantCurrent;
-    int                         fAvgCurrent;
     OSArray                     *fCellVoltages;
     uint64_t                    acAttach_ts; 
 
     CommandTable                cmdTable;
     bool                        fDisplayKeys;
     OSSet                       *fReportersSet;
-
-
-    
-
     // Accessor for MaxError reading
     // Percent error in MaxCapacity reading
     void    setMaxErr(int error);
@@ -126,9 +122,12 @@ protected:
     void    setFullyCharged(bool);
     bool    fullyCharged(void);
 
+    // Wrapper around IOPMPowerSource::setExternalConnected()
+    void    setExternalConnectedToIOPMPowerSource(bool);
+
     // Time remaining estimate - as measured instantaneously
     void    setInstantaneousTimeToEmpty(int seconds);
-    
+
     // Instantaneous amperage
     void    setInstantAmperage(int mA);
 
@@ -137,13 +136,13 @@ protected:
 
     // Time remaining until full estimate - 1 minute average
     int     averageTimeToFull(void);
-    
+
     void    setManufactureDate(int date);
     int     manufactureDate(void);
 
     void    setSerialNumber(uint16_t sernum);
     uint16_t    serialNumber(void);
-    
+
     void    setChargeStatus(const OSSymbol *sym);
     const OSSymbol    *chargeStatus(void);
 
@@ -151,9 +150,9 @@ protected:
     void    setManufacturerData(uint8_t *buffer, uint32_t bufferSize);
 
     void    oneTimeBatterySetup(void);
-    
+
     void    constructAppleSerialNumber(void);
-    
+
     CommandStruct *commandForState(uint32_t state);
     void    initializeCommands(void);
     bool    initiateTransaction(const CommandStruct *cs);
@@ -162,6 +161,8 @@ protected:
     bool    retryCurrentTransaction(uint32_t state);
     bool    handleSetItAndForgetIt(int state, int val16,
                                    const uint8_t *str32, IOByteCount len);
+    void                readAdapterInfo(void);
+    OSDictionary*       copySMCAdapterInfo(uint8_t port);
 
 public:
     static AppleSmartBattery *smartBattery(void);
@@ -177,14 +178,14 @@ public:
     void    handleSwitchToTrueCapacity(void);
     IOReturn handleSystemSleepWake(IOService * powerService, bool isSystemSleep);
 
-    
+
 protected:
-    void    logReadError( const char *error_type, 
+    void    logReadError( const char *error_type,
                           uint16_t additional_error,
                           uint32_t cmd);
 
     void    clearBatteryState(bool do_update);
-    
+
     void    incompleteReadTimeOut(void);
 
     void    rebuildLegacyIOBatteryInfo(void);
@@ -207,9 +208,9 @@ protected:
                                    void *result, void *destination) APPLE_KEXT_OVERRIDE;
     IOReturn updateReport(IOReportChannelList *channels, IOReportUpdateAction action,
                                 void *result, void *destination) APPLE_KEXT_OVERRIDE;
-#if TARGET_OS_IOS || TARGET_OS_WATCH
-    uint16_t    _gasGaugeFirmwareVersion;
-#endif
+
+private:
+    void updateDictionaryInIOReg(const OSSymbol *sym, smcToRegistry *keys);
 };
 
 #endif

@@ -117,8 +117,39 @@
     os_log_error(LOG_STREAM, fmt, ##args); \
 }
 
+#define CFDictionaryGetIntValue(dict, key, val) { \
+    CFNumberRef n;   \
+    if (CFDictionaryGetValueIfPresent((dict), (key), (const void **)&n)) { \
+        if (isA_CFNumber(n)) {    \
+            CFNumberGetValue((n), kCFNumberIntType, &(val)); \
+        } \
+    } \
+}
 
+#define CFDictionarySetIntValue(dict, key, val) { \
+    CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &(val)); \
+    if (n) {    \
+        CFDictionarySetValue((dict), (key), n);     \
+        CFRelease(n);   \
+    }   \
+}
 
+#define CFDictionaryGetDoubleValue(dict, key, val) { \
+    CFNumberRef n;   \
+    if (CFDictionaryGetValueIfPresent((dict), (key), (const void **)&n)) { \
+        if (n) {    \
+            CFNumberGetValue((n), kCFNumberDoubleType, &(val)); \
+        } \
+    } \
+}
+
+#define CFDictionarySetDoubleValue(dict, key, val) { \
+    CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &(val)); \
+    if (n) {    \
+        CFDictionarySetValue((dict), (key), n);     \
+        CFRelease(n);   \
+    }   \
+}
 
 /*****************************************************************************/
 
@@ -181,6 +212,7 @@ struct IOPMBattery {
     uint32_t                     externalChargeCapable:1;
     uint32_t                     isCharging:1;
     uint32_t                     showChargingUI:1;
+    uint32_t                     playChargingChime:1;
     uint32_t                     isPresent:1;
     uint32_t                     markedDeclining:1;
     uint32_t                     isTimeRemainingUnknown:1;
@@ -371,8 +403,12 @@ void mt2PublishReports(void);
  */
 void mt2PublishSleepWakeFailure(const char *failType, const char *failPhase, const char *pci_string);
 
-
-
+/* mt2PublishWakeTime
+ * powerd should call to report wake time
+ * @arg waketime wake time in milliseconds
+ * @arg waketype wake type
+ */
+void mt2PublishWakeTime(double waketime, WakeTypeEnum waketype);
 
 #define kAssertionHumanReadableReasonTTY        CFSTR("A remote user is connected. That prevents system sleep.")
 
@@ -384,13 +420,16 @@ __private_extern__ void                 logASLMessageWake(const char *sig, const
                                                         const char *failureStr,
                                                         IOPMCapabilityBits in_capabilities, WakeTypeEnum dark_wake);
 
+__private_extern__ void                 logASLMessageWakeTime(uint64_t waketime, WakeTypeEnum waketype);
+
+__private_extern__ void                 logASLMessageSMCShutdownCause(int shutdownCause);
 
 __private_extern__ void                 logASLMessagePMConnectionResponse(CFStringRef logSourceString, CFStringRef appNameString,
                                                          CFStringRef responseTypeString, CFNumberRef responseTime,
                                                          int notificationBits);
 
 __private_extern__ void                 logASLPMConnectionNotify(CFStringRef appNameString, int notificationBits);
-__private_extern__ void                 logASLDisplayStateChange();
+__private_extern__ void                 logASLDisplayStateChange(void);
 __private_extern__ void                 logASLThermalState(int thermalState);
 __private_extern__ void                 logASLPerforamceState(int perfState);
 __private_extern__ void                 logASLMessageAppStats(CFArrayRef appStats, char *domain);
@@ -432,7 +471,7 @@ __private_extern__ IOPMBattery          *_newBatteryFound(io_registry_entry_t);
 __private_extern__ void                 _batteryChanged(IOPMBattery *);
 __private_extern__ bool                 _batteryHas(IOPMBattery *, CFStringRef);
 __private_extern__ void                 _removeBattery(io_registry_entry_t);
-__private_extern__ CFDictionaryRef      _copyACAdapterInfo( );
+__private_extern__ CFDictionaryRef      _copyACAdapterInfo(CFDictionaryRef oldACDict);
 __private_extern__ PowerSources         _getPowerSource(void);
 __private_extern__ bool                 getPowerState(PowerSources *source, uint32_t *percentage);
 __private_extern__ IOReturn _getLowCapRatioTime(CFStringRef batterySerialNumber,
@@ -459,8 +498,8 @@ __private_extern__ SCDynamicStoreRef    _getSharedPMDynamicStore(void);
 // returns true on success; or false if the copy failed, or the UUID does not exist
 __private_extern__ bool                 _getUUIDString(char *buf, int buflen);
 __private_extern__ CFStringRef          _updateSleepReason(void);
-__private_extern__ CFStringRef          _getSleepReason();
-__private_extern__ void                 _resetWakeReason( );
+__private_extern__ CFStringRef          _getSleepReason(void);
+__private_extern__ void                 _resetWakeReason(void);
 __private_extern__ void                 _updateWakeReason(CFStringRef *wakeReason, CFStringRef *wakeType);
 __private_extern__ void                 getPlatformWakeReason(CFStringRef *wakeReason, CFStringRef *wakeType);
 __private_extern__ void                 appClaimWakeReason(xpc_connection_t peer, xpc_object_t claim);
@@ -479,8 +518,7 @@ __private_extern__ void                 _PortInvalidatedCallout(CFMachPortRef po
 
 __private_extern__ CFTimeInterval       _getHIDIdleTime(void);
 
-__private_extern__ CFRunLoopRef         _getPMRunLoop(void);
-__private_extern__ dispatch_queue_t     _getPMDispatchQueue(void);
+__private_extern__ dispatch_queue_t     _getPMMainQueue(void);
 
 __private_extern__ bool auditTokenHasEntitlement(
                                                  audit_token_t token,
@@ -490,14 +528,21 @@ __private_extern__ void                 _oneOffHacksSetup(void);
 
 __private_extern__ IOReturn getNvramArgInt(char *key, int *value);
 __private_extern__ IOReturn getNvramArgStr(char *key, char *buf, size_t bufSize);
-__private_extern__ uint64_t             getMonotonicContinuousTime( );
-__private_extern__ uint64_t             getMonotonicTime( );
+__private_extern__ uint64_t             getMonotonicContinuousTime(void );
+__private_extern__ uint64_t             getMonotonicTime(void);
 __private_extern__ uint64_t             monotonicTS2Secs(uint64_t tsc);
-__private_extern__ void                 incrementSleepCnt();
+__private_extern__ void                 incrementSleepCnt(void);
 __private_extern__ const char *sleepType2String(int sleepType);
-__private_extern__ int getLastSleepType();
+__private_extern__ int getLastSleepType(void);
 __private_extern__ IOReturn _smcWriteKey( uint32_t key, uint8_t *outBuf, uint8_t outBufMax);
 __private_extern__ IOReturn _smcReadKey( uint32_t key, uint8_t *outBuf, uint8_t *outBufMax, bool byteSwap);
+__private_extern__ IOReturn _smcReadKeySwizzle(uint32_t key, uint8_t *outBuf, uint8_t *outBufMax, unsigned int byteSwap);
+__private_extern__ bool isSenderEntitled(xpc_object_t remoteConnection, CFStringRef entitlementString, bool requireRoot);
+__private_extern__ void setCustomBatteryProps(xpc_object_t remoteConnection, xpc_object_t msg);
+__private_extern__ void resetCustomBatteryProps(xpc_object_t remoteConnection, xpc_object_t msg);
+
+__private_extern__ int pluginExecCommand(const char *path, char *const argv[],
+		dispatch_queue_t queue, void (*callback)(pid_t pid, int status));
 
 #ifdef XCTEST
 void xctSetPowerSource(PowerSources src);

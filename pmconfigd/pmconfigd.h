@@ -82,6 +82,7 @@
 #include "ExternalMedia.h"
 #include "Platform.h"
 #include "StandbyTimer.h"
+#include "PrivateLib.h"
 
 
 #include "adaptiveDisplay.h"
@@ -155,7 +156,7 @@ extern boolean_t powermanagement_server(mach_msg_header_t *, mach_msg_header_t *
 extern uint32_t  gDebugFlags;
 
 
-bool isDisplayAsleep( );
+bool isDisplayAsleep(void);
 
 kern_return_t _io_pm_last_wake_time(
                                     mach_port_t             server,

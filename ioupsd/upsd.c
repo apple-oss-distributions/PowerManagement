@@ -57,6 +57,7 @@
 
 #include <IOKit/ps/IOUPSPlugIn.h>
 #include "IOUPSPrivate.h"
+#include <AssertMacros.h>
 
 #define kDefaultUPSName		"Generic UPS"
 #define kDefaultTransport   "UNK"
@@ -78,6 +79,7 @@ typedef enum DeviceType {
     kDeviceTypeUPS,
     kDeviceTypeAccessoryBattery,
     kDeviceTypeBatteryCase,
+    kDeviceTypeGameController,
 } DeviceType;
 
 typedef struct UPSData {
@@ -91,7 +93,10 @@ typedef struct UPSData {
     CFRunLoopTimerRef       upsEventTimer;
     DeviceType              deviceType;
     Boolean                 requiresCurrentLimitControl;
+    Boolean                 requiresChargeCurrentUpdates;
+    CFRunLoopTimerRef       chargeCurrentUpdateTimer;
     Boolean                 hasACPower;
+    UInt32                  adapterFamily;
     io_object_t             batteryStateNotification;
     io_object_t             currentLimitNotification;
     io_object_t             requiredVoltageNotification;
@@ -114,23 +119,26 @@ static void RemoveAndReleasePowerManagerUPSEntry(UPSDataRef upsDataRef);
 static void UPSEventCallback(void * target, IOReturn result, void *refcon,
                              void *sender, CFDictionaryRef event);
 static void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event);
+static void BatteryCaseHandleAdapterFamilyChange(UPSDataRef upsDataRef, CFTypeRef adapterFamily);
 static void BatteryCaseHandleACStateChange(UPSDataRef upsDataRef, CFTypeRef powerState);
 static UPSDataRef GetPrivateData( CFDictionaryRef properties );
 static IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
                                            CFDictionaryRef properties,
                                            CFSetRef capabilities);
-static Boolean SetupMIGServer();
+static Boolean SetupMIGServer(void);
 
 //---------------------------------------------------------------------------
 // Battery case helper functions
 //---------------------------------------------------------------------------
 kern_return_t BatteryCaseSendCommand(UPSDataRef upsDataRef, CFStringRef commandString, SInt32 value);
+kern_return_t BatteryCaseSetAddress(UPSDataRef upsDataRef);
 void BatteryCaseBatteryStateChangedCallback(void *refcon, io_service_t service,
                                             uint32_t messageType, void *messageArgument);
 void BatteryCaseCurrentLimitChangeCallback(void *refcon, io_service_t service,
                                            uint32_t messageType, void *messageArgument);
 void BatteryCaseRequiredVoltageChangeCallback(void *refcon, io_service_t service,
                                               uint32_t messageType, void *messageArgument);
+void BatteryCasePollAverageChargeCurrentCallback(CFRunLoopTimerRef timer __unused, void *refcon);
 
 //---------------------------------------------------------------------------
 // main
@@ -349,7 +357,7 @@ void ProcessUPSEventSource(CFTypeRef typeRef, CFRunLoopTimerRef * pTimer, CFRunL
 // its HID usages.
 //---------------------------------------------------------------------------
 
-DeviceType IdentifyDeviceType(io_object_t upsDevice)
+DeviceType IdentifyDeviceType(io_object_t upsDevice, CFDictionaryRef upsProperties)
 {
     DeviceType deviceTypeToReturn = kDeviceTypeUPS; // default to generic UPS
     CFArrayRef usagePairs = IORegistryEntrySearchCFProperty(upsDevice,
@@ -386,6 +394,14 @@ DeviceType IdentifyDeviceType(io_object_t upsDevice)
         CFRelease(usagePairs);
     }
 
+    // All game controllers are explicitly labelled as such by HID
+    if (upsProperties) {
+        CFStringRef categoryRef = CFDictionaryGetValue(upsProperties, CFSTR(kIOPSAccessoryCategoryKey));
+        if (categoryRef && CFEqual(categoryRef, CFSTR(kIOPSAccessoryCategoryGameController))) {
+            deviceTypeToReturn = kDeviceTypeGameController;
+        }
+    }
+
     return deviceTypeToReturn;
 }
 
@@ -397,6 +413,17 @@ DeviceType IdentifyDeviceType(io_object_t upsDevice)
 // current limits over HID
 //---------------------------------------------------------------------------
 Boolean IsCurrentLimitControlRequired(UPSDataRef upsDataRef)
+{
+    return false;
+}
+
+//---------------------------------------------------------------------------
+// AreAverageChargeCurrentUpdatesRequired
+//
+// Identify whether a UPS is a device that requires updates on our average
+// charge current when AC is present
+//---------------------------------------------------------------------------
+Boolean AreAverageChargeCurrentUpdatesRequired(UPSDataRef upsDataRef)
 {
     return false;
 }
@@ -499,7 +526,7 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
             upsDataRef->upsEventSource      = upsEventSource;
             upsDataRef->upsEventTimer       = upsEventTimer;
             upsDataRef->isPresent           = true;
-            upsDataRef->deviceType          = IdentifyDeviceType(upsDevice);
+            upsDataRef->deviceType          = IdentifyDeviceType(upsDevice, upsProperties);
             
             kr = (*upsPlugInInterface)->getCapabilities(upsPlugInInterface, &upsCapabilites);
             
@@ -508,6 +535,7 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
             
             kr = CreatePowerManagerUPSEntry(upsDataRef, upsProperties, upsCapabilites);
             upsDataRef->requiresCurrentLimitControl = IsCurrentLimitControlRequired(upsDataRef);
+            upsDataRef->requiresChargeCurrentUpdates = AreAverageChargeCurrentUpdatesRequired(upsDataRef);
             
             if (kr != kIOReturnSuccess)
                 goto UPSDEVICEADDED_FAIL;
@@ -531,6 +559,13 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
                                                           BatteryCaseBatteryStateChangedCallback,
                                                           upsDataRef,
                                                           &(upsDataRef->batteryStateNotification));
+                }
+
+                // Set the battery case's address
+                kr = BatteryCaseSetAddress(upsDataRef);
+                if (kr != kIOReturnSuccess) {
+                    syslog(LOG_ERR, "failed to send address to power source %d (ret=0x%X)\n",
+                           upsDataRef->upsID, kr);
                 }
             }
             
@@ -620,7 +655,7 @@ void RemoveAndReleasePowerManagerUPSEntry(UPSDataRef upsDataRef) {
         return;
     
     upsDataRef->isPresent = FALSE;
-    
+
     
     if (upsDataRef->upsEventSource) {
         CFRunLoopRemoveSource(CFRunLoopGetCurrent(),
@@ -724,7 +759,13 @@ void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event)
         for (index = 0; index < count; index++) {
             // If a battery case changes from "unplugged" to "plugged in",
             // or vice versa, we need to configure it.
-            if (CFEqual(keys[index], CFSTR(kIOPSPowerSourceStateKey)) &&
+            if (CFEqual(keys[index], CFSTR(kIOPSPowerAdapterFamilyKey)) &&
+                upsDataRef->deviceType == kDeviceTypeBatteryCase) {
+                CFTypeRef oldValue = CFDictionaryGetValue(upsDataRef->upsStoreDict, keys[index]);
+                if (oldValue == NULL || !CFEqual(oldValue, values[index])) {
+                    BatteryCaseHandleAdapterFamilyChange(upsDataRef, values[index]);
+                }
+            } else if (CFEqual(keys[index], CFSTR(kIOPSPowerSourceStateKey)) &&
                 upsDataRef->deviceType == kDeviceTypeBatteryCase) {
                 CFTypeRef oldValue = CFDictionaryGetValue(upsDataRef->upsStoreDict, keys[index]);
                 if (oldValue && !CFEqual(oldValue, values[index])) {
@@ -765,6 +806,19 @@ kern_return_t BatteryCaseSendCommand(UPSDataRef upsDataRef, CFStringRef commandS
 }
 
 //---------------------------------------------------------------------------
+// BatteryCaseSetAddress
+//
+// Generates and sends an Address to the case for it to report back to the
+// phone as a way for clients of IOPowerSources to recognize the case outside
+// of the context of IOPowerSOurces
+//---------------------------------------------------------------------------
+kern_return_t BatteryCaseSetAddress(UPSDataRef upsDataRef) {
+    // NOOP on OS X
+    return KERN_NOT_SUPPORTED;
+}
+
+#define DECIKELVIN_OFFSET_FROM_DECICELSIUS  2732
+//---------------------------------------------------------------------------
 // BatteryCaseBatteryStateChangedCallback
 //
 // Called whenever the PMU charger updates. We filter for battery state
@@ -794,6 +848,19 @@ void BatteryCaseCurrentLimitChangeCallback(void *refcon, io_service_t service,
 //---------------------------------------------------------------------------
 void BatteryCaseRequiredVoltageChangeCallback(void *refcon, io_service_t service,
                                               uint32_t messageType, void *messageArgument) {
+    // NOOP on OS X
+}
+
+//---------------------------------------------------------------------------
+// BatteryCasePollAverageChargeCurrentCallback
+//
+// Timer callback to copy the average charging current since the last poll.
+//---------------------------------------------------------------------------
+void BatteryCasePollAverageChargeCurrentCallback(CFRunLoopTimerRef timer __unused, void *refcon) {
+    // NOOP on OS X
+}
+
+void BatteryCaseHandleAdapterFamilyChange(UPSDataRef upsDataRef, CFTypeRef adapterFamilyRef) {
     // NOOP on OS X
 }
 
@@ -952,7 +1019,7 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
         // rdar://problem/21817316 Initialize battery cases to a max capacity
         // of 0 so they don't show up in UI until we've received the correct
         // value from the device.
-        if (upsDataRef->deviceType == kDeviceTypeBatteryCase) {
+        if (upsDataRef->deviceType == kDeviceTypeBatteryCase || upsDataRef->deviceType == kDeviceTypeGameController) {
             elementValue = 0;
         } else {
             elementValue = 100;
@@ -969,7 +1036,11 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
             //  battery capacities, so we want a consistent measure. For now we
             // have settled on percentage of full capacity.
             //
-            elementValue = 100;
+            // rdar://problem/51062434 the HID layer will not report a key
+            // changing until it receives a value different from what it
+            // was initialized to. Since CurrentCapacity initializes to 0
+            // we have to inititialze to 0 as well.
+            elementValue = 0;
             number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
                                     &elementValue);
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSCurrentCapacityKey),
@@ -1020,7 +1091,7 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
             CFRelease(number);
         }
         
-        if (upsDataRef->deviceType == kDeviceTypeAccessoryBattery) {
+        if (upsDataRef->deviceType == kDeviceTypeAccessoryBattery || upsDataRef->deviceType == kDeviceTypeGameController) {
             // This is an accessory battery
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTypeKey), CFSTR(kIOPSAccessoryType));
         }
