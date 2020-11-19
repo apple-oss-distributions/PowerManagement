@@ -22,6 +22,16 @@
  */
 
 #include "pmconfigd.h"
+
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+#include <reboot2.h>
+
+#ifndef kIOPMMessageRequestSystemShutdown
+#define kIOPMMessageRequestSystemShutdown \
+        iokit_family_msg(sub_iokit_powermanagement, 0x470)
+#endif
+#endif /* (TARGET_OS_OSX && TARGET_CPU_ARM64) */
+
 /* load
  *
  * configd entry point
@@ -32,58 +42,61 @@ static CFStringRef              gTZNotificationNameString           = NULL;
 IOPMNotificationHandle          gESPreferences                      = 0;
 
 static io_connect_t             _pm_ack_port                        = 0;
-static io_iterator_t            _ups_added_noteref                  = 0;
-static int                      _alreadyRunningIOUPSD               = 0;
 
 static int                      gCPUPowerNotificationToken          = 0;
 static bool                     gExpectingWakeFromSleepClockResync  = false;
 static CFAbsoluteTime           *gLastWakeTime                      = NULL;
 static CFTimeInterval           *gLastSMCS3S0WakeInterval           = NULL;
 static CFStringRef              gCachedNextSleepWakeUUIDString      = NULL;
+#if !TARGET_OS_IPHONE
 static int                      gLastWakeTimeToken                  = -1;
 static int                      gLastSMCS3S0WakeIntervalToken       = -1;
+#endif
 
 static LoginWindowNotifyTokens  lwNotify = {0,0,0,0,0};
 
 static CFStringRef              gConsoleNotifyKey                   = NULL;
+#if !(TARGET_OS_OSX && TARGET_CPU_ARM64)
 static bool                     gDisplayIsAsleep = false;
+#endif
 static struct timeval           gLastSleepTime                      = {0, 0};
 
 static mach_port_t              serverPort                          = MACH_PORT_NULL;
 static dispatch_mach_t          gListener;
+#if !TARGET_OS_IPHONE
 static bool                     gSMCSupportsWakeupTimer             = true;
 static int                      _darkWakeThermalEventCount          = 0;
-static dispatch_source_t        gDWTMsgDispatch; /* Darkwake thermal emergency message handler dispatch */
+static bool                     gEvaluateDWThermalEmergency = false;
+#endif
 
+static natural_t                lastSleepWakeMsg                    = 0;
 
 
 // foward declarations
 static void initializeESPrefsNotification(void);
 static void initializeInterestNotifications(void);
-static void initializeHIDInterestNotifications(IONotificationPortRef notify_port);
 static void initializeTimezoneChangeNotifications(void);
 static void initializeCalendarResyncNotification(void);
 static void initializeShutdownNotifications(void);
 static void initializeRootDomainInterestNotifications(void);
+#if !TARGET_OS_IPHONE
 static void initializeUserNotifications(void);
 static void enableSleepWakeWdog(void);
+#if !(TARGET_OS_OSX && TARGET_CPU_ARM64)
 static void displayMatched(void *, io_iterator_t);
 static void displayPowerStateChange(
                                     void *ref,
                                     io_service_t service,
                                     natural_t messageType,
                                     void *arg);
+#endif
 
 
+#endif
 static void initializeSleepWakeNotifications(void);
 
 static void SleepWakeCallback(void *,io_service_t, natural_t, void *);
 static void ESPrefsHaveChanged(void);
-static CFMutableDictionaryRef copyUPSMatchingDict(void);
-static void _ioupsd_exited(pid_t, int);
-static void UPSDeviceAdded(void *, io_iterator_t);
-static void ioregBatteryMatch(void *, io_iterator_t);
-static void ioregBatteryInterest(void *, io_service_t, natural_t, void *);
 static void RootDomainInterest(void *, io_service_t, natural_t, void *);
 static void broadcastGMTOffset(void);
 
@@ -156,8 +169,10 @@ powerd_init(void *__unused context)
     initializeShutdownNotifications();
     initializeRootDomainInterestNotifications();
 
+#if !TARGET_OS_IPHONE
     initializeUserNotifications();
     _oneOffHacksSetup();
+#endif
 
     PMConnection_prime();
     initializeSleepWakeNotifications();
@@ -172,6 +187,7 @@ powerd_init(void *__unused context)
     PMSystemEvents_prime();
     SystemLoad_prime();
 
+#if !TARGET_OS_IPHONE
     UPSLowPower_prime();
     TTYKeepAwake_prime();
     ExternalMedia_prime();
@@ -180,11 +196,18 @@ powerd_init(void *__unused context)
     enableSleepWakeWdog();
     ads_prime();
     standbyTimer_prime();
+#endif
 
     _unclamp_silent_running(false);
     notify_post(kIOUserAssertionReSync);
     logASLMessagePMStart();
 
+#if TARGET_OS_IPHONE
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED,0);
+    pthread_set_fixedpriority_self();
+    initializeAggdDailyReport();
+
+#endif
 
     BatteryTimeRemaining_finish();
 }
@@ -202,89 +225,6 @@ int main(int argc __unused, char *argv[] __unused)
 }
 
 
-
-
-static void ioregBatteryMatch(
-    void *refcon,
-    io_iterator_t b_iter)
-{
-    IOPMBattery                 *tracking;
-    IONotificationPortRef       notify = (IONotificationPortRef)refcon;
-    io_registry_entry_t         battery;
-    io_object_t                 notification_ref;
-
-    while((battery = (io_registry_entry_t)IOIteratorNext(b_iter)))
-    {
-        // Add battery to our list of batteries
-        tracking = _newBatteryFound(battery);
-
-        LogObjectRetainCount("PM::BatteryMatch(M0) me", battery);
-
-        // And install an interest notification on it
-        IOServiceAddInterestNotification(notify, battery,
-                            kIOGeneralInterest, ioregBatteryInterest,
-                            (void *)tracking, &notification_ref);
-
-        LogObjectRetainCount("PM::BatteryMatch(M1) me", battery);
-        LogObjectRetainCount("PM::BatteryMatch(M1) msg_port", notification_ref);
-
-        tracking->msg_port = notification_ref;
-        IOObjectRelease(battery);
-    }
-    InternalEvaluateAssertions();
-    InternalEvalConnections();
-    evalTcpkaForPSChange();
-}
-
-__private_extern__ void ioregBatteryProcess(IOPMBattery *changed_batt,
-                                            io_service_t batt)
-{
-    if (!changed_batt) {
-        return;
-    }
-
-    PowerSources oldPS = _getPowerSource();
-
-    // Update the arbiter
-    changed_batt->me = (io_registry_entry_t)batt;
-    _batteryChanged(changed_batt);
-
-    if (changed_batt->properties == NULL) {
-        // Nothing to do
-        return;
-    }
-
-    LogObjectRetainCount("PM:BatteryInterest(B0) msg_port", changed_batt->msg_port);
-    LogObjectRetainCount("PM:BatteryInterest(B1) msg_port", changed_batt->me);
-
-    IOPMBattery **batt_stats = _batteries();
-    kernelPowerSourcesDidChange(changed_batt);
-
-    SystemLoadBatteriesHaveChanged(batt_stats);
-    InternalEvaluateAssertions();
-    InternalEvalConnections();
-    if (_getPowerSource() != oldPS) {
-        evalTcpkaForPSChange();
-        evalProxForPSChange();
-    }
-
-    return;
-}
-
-static void ioregBatteryInterest(
-    void *refcon,
-    io_service_t batt,
-    natural_t messageType,
-    void *messageArgument)
-{
-    if (kIOPMMessageBatteryStatusHasChanged != messageType) {
-        return;
-    }
-
-    IOPMBattery *changed_batt = (IOPMBattery *)refcon;
-
-    ioregBatteryProcess(changed_batt, batt);
-}
 
 
 __private_extern__ void
@@ -315,6 +255,7 @@ ClockSleepWakeNotification(IOPMSystemPowerStateCapabilities old_cap,
     }
 }
 
+#if !TARGET_OS_IPHONE
 
 static char* const spindump_args[] =
 { "/usr/sbin/spindump", "kextd","30", "400", "-sampleWithoutTarget",
@@ -379,6 +320,7 @@ static void takeSpindump()
 
     spindump_pid = pluginExecCommand("/usr/sbin/spindump", spindump_args, NULL, NULL);
 }
+#endif
 
 void sendSleepNotificationResponse(void *acknowledgementToken, bool allow)
 {
@@ -390,6 +332,31 @@ void sendSleepNotificationResponse(void *acknowledgementToken, bool allow)
         IOCancelPowerChange(_pm_ack_port, (long)acknowledgementToken);
     }
 
+}
+
+void handleSoftwareSleep()
+{
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+    if (lastSleepWakeMsg == kIOMessageCanSystemSleep) {
+        DEBUG_LOG("This is an idle sleep. Doing nothing");
+        return;
+    }
+
+    CFStringRef sleepReason = _getSleepReason();
+    if (!isDisplayAsleep()) {
+        // turn off display if sleep reason is Software Sleep
+        if (CFEqual(sleepReason, CFSTR(kIOPMSoftwareSleepKey))) {
+            INFO_LOG("Turning off display for Software Sleep");
+            blankDisplay();
+        } else if (CFEqual(sleepReason, CFSTR(kIOPMClamshellSleepKey))) {
+            INFO_LOG("Turning off display for Clamshell Sleep");
+            blankDisplay();
+        } else if (IS_EMERGENCY_SLEEP(sleepReason)) {
+            INFO_LOG("Turning off display for emergency sleep");
+            blankDisplay();
+        }
+    }
+#endif
 }
 
 /*
@@ -404,8 +371,6 @@ SleepWakeCallback(
     natural_t       messageType,
     void            *acknowledgementToken)
 {
-
-    BatteryTimeRemainingSleepWakeNotification(messageType);
     CFStringRef uuid = IOPMSleepWakeCopyUUID();
 
     // Log Message to MessageTracer
@@ -417,8 +382,14 @@ SleepWakeCallback(
             if (userActiveRootDomain()) {
                 userActiveHandleSleep();
             }
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+            // disable clamshell sleep
+            INFO_LOG("Disable clamshell sleep on kIOMessageSystemWillSleep");
+            disableClamshellSleepState();
+#endif
             IOAllowPowerChange(_pm_ack_port, (long)acknowledgementToken);
-             break;
+            handleSoftwareSleep();
+            break;
 
         case kIOMessageCanSystemSleep:
             INFO_LOG("Received kIOMessageCanSystemSleep. UUID: %{public}@\n", uuid);
@@ -427,12 +398,22 @@ SleepWakeCallback(
             break;
 
         case kIOMessageSystemWillPowerOn:
+#if !TARGET_OS_IPHONE
+            setVMDarkwakeMode(false);
+            /* fallthrough */
+#endif
         case kIOMessageSystemWillNotSleep:
             INFO_LOG("Received %{public}s. UUID: %{public}@\n",
                     (messageType == kIOMessageSystemWillPowerOn) ? "kIOMessageSystemWillPowerOn" :
                         "kIOMessageSystemWillNotSleep", uuid);
             _set_sleep_revert(true);
             checkPendingWakeReqs(ALLOW_PURGING);
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, kClamshellEvaluateDelay * NSEC_PER_SEC), _getPMMainQueue(), ^{
+                INFO_LOG("EvaluateClamshellSleepState after wake");
+                evaluateClamshellSleepState();
+            });
+#endif
             break;
 
         case kIOMessageSystemHasPoweredOn:
@@ -446,6 +427,7 @@ SleepWakeCallback(
     if (uuid) {
         CFRelease(uuid);
     }
+    lastSleepWakeMsg = messageType;
 }
 
 /* ESPrefsHaveChanged
@@ -460,84 +442,17 @@ ESPrefsHaveChanged(void)
     // Tell ES Prefs listeners that the prefs have changed
     PMSettingsPrefsHaveChanged();
     mt2EvaluateSystemSupport();
+#if !TARGET_OS_IPHONE
     UPSLowPowerPrefsHaveChanged();
     TTYKeepAwakePrefsHaveChanged();
+#if !(TARGET_OS_OSX && TARGET_CPU_ARM64)
     evalProximityPrefsChange();
+#endif
+#endif
     SystemLoadPrefsHaveChanged();
 
     return;
 }
-
-static const char *const ioupsd_path = "/usr/libexec/ioupsd";
-
-static void
-_ioupsd_start(void)
-{
-    char *const argv[2] = { (char * const)ioupsd_path, NULL};
-    int rc = pluginExecCommand(ioupsd_path, argv, _getPMMainQueue(), &_ioupsd_exited);
-    if (rc != 0) {
-        syslog(LOG_ERR, "PowerManagement: %s failed to launch: %d, %s\n",
-            ioupsd_path, errno, strerror(errno));
-    }
-    _alreadyRunningIOUPSD = (rc == 0);
-}
-
-/* _ioupsd_exited
- *
- * Gets called (by configd) when /usr/libexec/ioupsd exits
- */
-static void _ioupsd_exited(
-    pid_t           pid,
-    int             status)
-{
-    asl_log(0,0,ASL_LEVEL_ERR, "ioupsd exited with status %d\n", status);
-
-    _alreadyRunningIOUPSD = 0;
-
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        // Re-scan the registry for any objects of interest that might have
-        // been published before _ioupsd_exited() is called.
-        io_iterator_t   iter;
-        CFDictionaryRef matchingDict = copyUPSMatchingDict();
-        if (matchingDict) {
-            kern_return_t kr = IOServiceGetMatchingServices(kIOMasterPortDefault, matchingDict, &iter);
-            matchingDict = 0; // reference consumed by IOServiceGetMatchingServices
-
-            if ((kr == kIOReturnSuccess) && (iter != MACH_PORT_NULL)) {
-                UPSDeviceAdded(NULL, iter);
-                IOObjectRelease(iter);
-            }
-        }
-    } else {
-        // ioupsd didn't exit cleanly.
-        syslog(LOG_ERR, "PowerManagement: %s(%d) has exited with status %d\n",
-            ioupsd_path, pid, status);
-
-        // relaunch
-        _ioupsd_start();
-    }
-}
-
-/* UPSDeviceAdded
- *
- * A UPS has been detected running on the system.
- *
- */
-static void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
-{
-    io_object_t                 upsDevice = MACH_PORT_NULL;
-
-    asl_log(0,0,ASL_LEVEL_ERR, "UPSDeviceAdded. _alreadyRunningIOUPSD:%d\n", _alreadyRunningIOUPSD);
-    while ( (upsDevice = IOIteratorNext(iterator)) )
-    {
-        // If not running, launch the management process ioupsd now.
-        if (!_alreadyRunningIOUPSD) {
-            _ioupsd_start();
-        }
-        IOObjectRelease(upsDevice);
-    }
-}
-
 
 /* timeZoneChangedCallback
  *
@@ -686,6 +601,7 @@ lwShutdownHandler(void *context, dispatch_mach_reason_t reason,
 }
 
 
+#if !TARGET_OS_IPHONE && !(TARGET_OS_OSX && TARGET_CPU_ARM64)
 /* displayPowerStateChange
  *
  * displayPowerStateChange gets notified when the display changes power state.
@@ -703,8 +619,7 @@ displayPowerStateChange(void *ref, io_service_t service, natural_t messageType, 
     IOPowerStateChangeNotification *params = (IOPowerStateChangeNotification*) arg;
     bool prevState = gDisplayIsAsleep;
 
-    switch (messageType)
-    {
+    switch (messageType) {
             // Display Wrangler power stateNumber values
             // 4 Display ON
             // 3 Display Dim
@@ -718,7 +633,7 @@ displayPowerStateChange(void *ref, io_service_t service, natural_t messageType, 
                 gDisplayIsAsleep = true;
             }
 
-            if ( params->stateNumber < kWranglerPowerStateSleep)
+            if ( params->stateNumber <= kWranglerPowerStateSleep)
             {
                // Notify a SystemLoad state change when display is completely off
                 SystemLoadDisplayPowerStateHasChanged(gDisplayIsAsleep);
@@ -741,10 +656,15 @@ displayPowerStateChange(void *ref, io_service_t service, natural_t messageType, 
         logASLDisplayStateChange();
     }
 }
+#endif
 
-__private_extern__ bool isDisplayAsleep( )
+__private_extern__ bool isDisplayAsleep(void)
 {
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+    return !(skylightDisplayOn());
+#else
     return gDisplayIsAsleep;
+#endif
 }
 
 /* initializeESPrefsNotification
@@ -830,30 +750,66 @@ static void incoming_XPC_connection(xpc_connection_t peer)
                      else if ((inEvent = xpc_dictionary_get_value(event, kClaimSystemWakeEvent))) {
                         appClaimWakeReason(peer, inEvent);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kAssertionCreateMsg))) {
+                     else if (xpc_dictionary_get_value(event, kAssertionCreateMsg)) {
                         asyncAssertionCreate(peer, event);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kAssertionReleaseMsg))) {
+                     else if (xpc_dictionary_get_value(event, kAssertionReleaseMsg)) {
                         asyncAssertionRelease(peer, event);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kAssertionPropertiesMsg))) {
+                     else if (xpc_dictionary_get_value(event, kAssertionPropertiesMsg)) {
                         asyncAssertionProperties(peer, event);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kPSAdapterDetails))) {
+                     else if (xpc_dictionary_get_value(event, kPSAdapterDetails)) {
                          sendAdapterDetails(peer, event);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kCustomBatteryProps))) {
+#if TARGET_OS_OSX
+                     else if (xpc_dictionary_get_value(event, "readBatteryHealthPersistentData")) {
+                         getBatteryHealthPersistentData(peer, event);
+                     }
+#endif  // TARGET_OS_OSX
+                     else if (xpc_dictionary_get_value(event, kCustomBatteryProps)) {
                          setCustomBatteryProps(peer, event);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kResetCustomBatteryProps))) {
+                     else if (xpc_dictionary_get_value(event, kResetCustomBatteryProps)) {
                          resetCustomBatteryProps(peer, event);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kAssertionSetStateMsg))) {
+                     else if (xpc_dictionary_get_value(event, kAssertionSetStateMsg)) {
                          processSetAssertionState(peer, event);
                      }
-                     else if ((inEvent = xpc_dictionary_get_value(event, kInactivityWindowKey))) {
+                     else if (xpc_dictionary_get_value(event, kIOPMPowerEventDataKey)) {
+                        getScheduledWake(peer, event);
+                     }
+#if TARGET_OS_IPHONE && !TARGET_OS_BRIDGE
+                     else if (xpc_dictionary_get_value(event, kBatteryHeatMapData)) {
+                         sendHeatMapData(peer, event);
+                     }
+                     else if (xpc_dictionary_get_value(event, kBatteryCycleCountData)) {
+                         sendCycleCountData(peer, event);
+                     }
+#endif // TARGET_OS_IPHONE && !TARGET_OS_BRIDGE
+#if TARGET_OS_IOS || TARGET_OS_WATCH || TARGET_OS_OSX
+                     else if (xpc_dictionary_get_value(event, kSetBHUpdateTimeDelta)) {
+                         setBHUpdateTimeDelta(peer, event);
+                     }
+#endif // TARGET_OS_IOS || TARGET_OS_WATCH || TARGET_OS_OSX
+#if !TARGET_OS_IPHONE
+                     else if (xpc_dictionary_get_value(event, kInactivityWindowKey)) {
                          setInactivityWindow(peer, event);
                      }
+#endif // !TARGET_OS_IPHONE
+#if TARGET_OS_IOS || TARGET_OS_WATCH
+                     else if (xpc_dictionary_get_value(event, kBatteryKioskModeData)) {
+                         sendKioskModeData(peer, event);
+                     }
+#endif // TARGET_OS_IOS || TARGET_OS_WATCH
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+                     else if ((inEvent = xpc_dictionary_get_value(event, kSkylightCheckInKey))) {
+                         skylightCheckIn(peer, event);
+                     }
+                     else if ((inEvent = xpc_dictionary_get_value(event, kDesktopModeKey))) {
+                         updateDesktopMode(peer, event);
+                     }
+#endif
                      else {
                         os_log_error(OS_LOG_DEFAULT, "Unexpected xpc dictionary\n");
                      }
@@ -914,7 +870,9 @@ void dynamicStoreNotifyCallBack(
                                 range,
                                 gConsoleNotifyKey))
     {
+#if !TARGET_OS_IPHONE
         SystemLoadUserStateHasChanged();
+#endif
     }
 
     return;
@@ -948,9 +906,15 @@ kern_return_t _io_pm_set_value_int(
             *result = setReservePwrMode(inValue);
         break;
 
+#if !TARGET_OS_IPHONE
     case kIOPMPushConnectionActive:
         setPushConnectionState(inValue ? true:false);
         break;
+
+    case kIOPMTCPKeepAliveExpirationOverride:
+        setTCPKeepAliveOverrideSec(inValue);
+        break;
+#endif
 
     default:
         break;
@@ -972,6 +936,7 @@ kern_return_t _io_pm_get_value_int(
 
     switch(selector)
     {
+#if !TARGET_OS_IPHONE
       case kIOPMGetSilentRunningInfo:
          if ( smcSilentRunningSupport( ))
             *outValue = 1;
@@ -1005,6 +970,7 @@ kern_return_t _io_pm_get_value_int(
     case kIOPMPushConnectionActive:
         *outValue = getPushConnectionState();
         break;
+#endif
 
       default:
          *outValue = 0;
@@ -1063,7 +1029,9 @@ initializeInterestNotifications()
 {
     IONotificationPortRef       notify_port = 0;
     io_iterator_t               battery_iter = 0;
+#if !TARGET_OS_IPHONE && !(TARGET_OS_OSX && TARGET_CPU_ARM64)
     io_iterator_t               display_iter = 0;
+#endif
 
     kern_return_t               kr;
 
@@ -1071,19 +1039,7 @@ initializeInterestNotifications()
     notify_port = IONotificationPortCreate(0);
 
 
-    kr = IOServiceAddMatchingNotification(
-                                notify_port,
-                                kIOFirstMatchNotification,
-                                IOServiceMatching("IOPMPowerSource"),
-                                ioregBatteryMatch,
-                                (void *)notify_port,
-                                &battery_iter);
-    if(KERN_SUCCESS == kr)
-    {
-        // Install notifications on existing instances.
-        ioregBatteryMatch((void *)notify_port, battery_iter);
-    }
-
+#if !TARGET_OS_IPHONE  && !(TARGET_OS_OSX && TARGET_CPU_ARM64)
     kr = IOServiceAddMatchingNotification(
                                 notify_port,
                                 kIOFirstMatchNotification,
@@ -1100,160 +1056,26 @@ initializeInterestNotifications()
         asl_log(NULL, NULL, ASL_LEVEL_ERR,
                 "Failed to match DisplayWrangler(0x%x)\n", kr);
     }
+#elif !TARGET_OS_OSX
+    int token;
+    uint64_t displayState;
+    notify_register_dispatch( kIOHIDEventSystemDisplayStatusNotifyKey,
+                              &token, _getPMMainQueue(),
+                              ^(int token) {
+                                    uint64_t displayState;
+                                    notify_get_state(token, &displayState);
+                                    gDisplayIsAsleep = displayState ? 0 : 1;
+                                    SystemLoadDisplayPowerStateHasChanged(gDisplayIsAsleep);
+                                    logASLDisplayStateChange();
+                              });
+    // Set initial state
+    notify_get_state(token, &displayState);
+    gDisplayIsAsleep = displayState ? 0 : 1;
 
-    // Listen for Power devices and Battery Systems to start ioupsd
-    initializeHIDInterestNotifications(notify_port);
-    IONotificationPortSetDispatchQueue(notify_port, _getPMMainQueue());
-}
 
-static CFMutableDictionaryRef
-copyUPSMatchingDict( )
-{
-    CFMutableArrayRef devicePairs = NULL;
-    CFMutableDictionaryRef matchingDict = NULL;
-    CFNumberRef cfUsageKey = NULL;
-    bool dictCreated = false;
-    CFMutableDictionaryRef pair  = NULL;
-    CFNumberRef  cfUsagePageKey = NULL;
-    int i, count;
-
-    int usagePages[]    = {kIOPowerDeviceUsageKey,  kIOBatterySystemUsageKey,   kHIDPage_AppleVendor,                   kHIDPage_PowerDevice};
-    int usages[]        = {0,                       0,                          kHIDUsage_AppleVendor_AccessoryBattery, kHIDUsage_PD_PeripheralDevice};
-
-    matchingDict = IOServiceMatching(kIOHIDDeviceKey);
-    if (!matchingDict) {
-        goto exit;
-    }
-
-    devicePairs = CFArrayCreateMutable(kCFAllocatorDefault, 4, &kCFTypeArrayCallBacks);
-    if (!devicePairs) {
-        goto exit;
-    }
-
-    count = sizeof(usagePages)/sizeof(usagePages[0]);
-    for (i = 0; i < count; i++) {
-        if (!usagePages[i]) {
-            continue;
-        }
-
-        pair = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
-                                                                &kCFTypeDictionaryValueCallBacks);
-        if (!pair) {
-            goto exit;
-        }
-
-        // We need to box the Usage Page value up into a CFNumber... sorry bout that
-        cfUsagePageKey = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &usagePages[i]);
-        if (!cfUsagePageKey) {
-            goto exit;
-        }
-
-        CFDictionarySetValue(pair, CFSTR(kIOHIDDeviceUsagePageKey), cfUsagePageKey);
-        CFRelease(cfUsagePageKey);
-        cfUsagePageKey = NULL;
-
-        if (usages[i]) {
-            cfUsageKey = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &usages[i]);
-            if (!cfUsageKey) {
-                goto exit;
-            }
-
-            CFDictionarySetValue(pair, CFSTR(kIOHIDDeviceUsageKey), cfUsageKey);
-            CFRelease(cfUsageKey);
-            cfUsageKey = NULL;
-        }
-
-        CFArrayAppendValue(devicePairs, pair);
-        CFRelease(pair);
-        pair = NULL;
-    }
-
-    CFDictionarySetValue(matchingDict, CFSTR(kIOHIDDeviceUsagePairsKey), devicePairs);
-    CFRelease(devicePairs);
-    devicePairs = 0;
-    dictCreated = true;
-
-exit:
-
-    if (devicePairs) {
-        CFRelease(devicePairs);
-    }
-    if (pair) {
-        CFRelease(pair);
-    }
-    if (cfUsagePageKey) {
-        CFRelease(cfUsagePageKey);
-    }
-    if (cfUsageKey) {
-        CFRelease(cfUsageKey);
-    }
-    if (!dictCreated && matchingDict) {
-        CFRelease(matchingDict);
-        matchingDict = NULL;
-    }
-
-    return matchingDict;
-}
-
-static void
-initializeHIDInterestNotifications(IONotificationPortRef notify_port)
-{
-    CFMutableDictionaryRef matchingDict = NULL;
-    asl_log(0,0,ASL_LEVEL_ERR, "Registering for UPS devices\n");
-#if 0
-    matchingDict = IOServiceMatching(kIOHIDDeviceKey);
-    if (!matchingDict) {
-        return;
-    }
-
-    // We need to box the Usage Page value up into a CFNumber... sorry bout that
-    CFNumberRef cfUsagePageKey = CFNumberCreate(kCFAllocatorDefault,
-                                                kCFNumberIntType,
-                                                &usagePage);
-    if (!cfUsagePageKey) {
-        CFRelease(matchingDict);
-        return;
-    }
-
-    CFDictionarySetValue(matchingDict,
-                         CFSTR(kIOHIDDeviceUsagePageKey),
-                         cfUsagePageKey);
-    CFRelease(cfUsagePageKey);
-
-    if (usage) {
-        CFNumberRef cfUsageKey = CFNumberCreate(kCFAllocatorDefault,
-                                                    kCFNumberIntType,
-                                                    &usage);
-        if (!cfUsageKey) {
-            CFRelease(matchingDict);
-            return;
-        }
-
-        CFDictionarySetValue(matchingDict,
-                             CFSTR(kIOHIDDeviceUsageKey),
-                             cfUsageKey);
-        CFRelease(cfUsageKey);
-    }
-#else
-    matchingDict = copyUPSMatchingDict();
 #endif
 
-    // Now set up a notification to be called when a device is first matched by
-    // I/O Kit. Note that this will not catch any devices that were already
-    // plugged in so we take care of those later.
-    kern_return_t kr =
-            IOServiceAddMatchingNotification(notify_port,
-                                             kIOFirstMatchNotification,
-                                             matchingDict,
-                                             UPSDeviceAdded,
-                                             NULL,
-                                             &_ups_added_noteref);
-
-    matchingDict = 0; // reference consumed by AddMatchingNotification
-    if ( kr == kIOReturnSuccess ) {
-        // Check for existing matching devices and launch ioupsd if present.
-        UPSDeviceAdded( NULL, _ups_added_noteref);
-    }
+    IONotificationPortSetDispatchQueue(notify_port, _getPMMainQueue());
 }
 
 /* initializeTimezoneChangeNotifications
@@ -1271,7 +1093,11 @@ initializeTimezoneChangeNotifications(void)
                         "NSSystemTimeZoneDidChangeDistributedNotification",
                         kCFStringEncodingMacRoman);
 
+#if TARGET_OS_IPHONE
+    distNoteCenter = CFNotificationCenterGetDarwinNotifyCenter();
+#else
     distNoteCenter = CFNotificationCenterGetDistributedCenter();
+#endif
     if(distNoteCenter)
     {
         CFNotificationCenterAddObserver(
@@ -1309,7 +1135,7 @@ exit:
     return;
 }
 
-static void calendarRTCDidResync_getSMCWakeInterval(void)
+static bool calendarRTCDidResync_getSMCWakeInterval(void)
 {
     CFAbsoluteTime      lastWakeTime;
     struct timeval      lastSleepTime;
@@ -1320,7 +1146,7 @@ static void calendarRTCDidResync_getSMCWakeInterval(void)
 
     if (!gExpectingWakeFromSleepClockResync) {
         // This is a non-wake-from-sleep clock resync, so we'll ignore it.
-        goto exit;
+        return false;
     }
 
     if (sysctlbyname("kern.sleeptime", &lastSleepTime, &len, NULL, 0) ||
@@ -1329,7 +1155,7 @@ static void calendarRTCDidResync_getSMCWakeInterval(void)
     {
         // This is a clock resync after sleep has started but before
         // platform sleep.
-        goto exit;
+        return false;
     }
 
     // if needed, init standalone memory for last wake time data
@@ -1339,13 +1165,13 @@ static void calendarRTCDidResync_getSMCWakeInterval(void)
         bufSize = sizeof(*gLastWakeTime) + sizeof(*gLastSMCS3S0WakeInterval);
         if (0 != vm_allocate(mach_task_self(), (void*)&gLastWakeTime,
                              bufSize, VM_FLAGS_ANYWHERE)) {
-            return;
+            goto exit;
         }
         gLastSMCS3S0WakeInterval = gLastWakeTime + 1;
     } else {
         // validate pointers allocated earlier
         if (!gLastWakeTime || !gLastSMCS3S0WakeInterval)
-            return;
+            goto exit;
     }
 
     // This is a wake-from-sleep resync, so commit the last wake time
@@ -1353,11 +1179,8 @@ static void calendarRTCDidResync_getSMCWakeInterval(void)
     *gLastSMCS3S0WakeInterval = 0;
     gExpectingWakeFromSleepClockResync = false;
 
-    // Re-enable battery time remaining calculations
-    (void) BatteryTimeRemainingRTCDidResync();
-
 exit:
-    return;
+    return true;
 }
 
 static void
@@ -1372,18 +1195,20 @@ calendarRTCDidResyncHandler(void *context, dispatch_mach_reason_t reason,
             (void) host_request_notification(mach_host_self(), HOST_NOTIFY_CALENDAR_CHANGE,
                                              header->msgh_local_port);
 
-            calendarRTCDidResync_getSMCWakeInterval();
+            bool did_update = calendarRTCDidResync_getSMCWakeInterval();
             AutoWakeCalendarChange();
 
             // calendar has resync. Safe to get timestamps now
-            CFAbsoluteTime wakeStart;
-            CFTimeInterval smcAdjustment;
-            IOReturn rc = IOPMGetLastWakeTime(&wakeStart, &smcAdjustment);
-            if (rc == kIOReturnSuccess) {
-                uint64_t wakeStartTimestamp = CFAbsoluteTimeToMachAbsoluteTime(wakeStart);
-                DEBUG_LOG("WakeTime: Calendar resynced\n");
-                updateCurrentWakeStart(wakeStartTimestamp);
-                updateWakeTime();
+            if (did_update) {
+                CFAbsoluteTime wakeStart;
+                CFTimeInterval smcAdjustment;
+                IOReturn rc = IOPMGetLastWakeTime(&wakeStart, &smcAdjustment);
+                if (rc == kIOReturnSuccess) {
+                    uint64_t wakeStartTimestamp = CFAbsoluteTimeToMachAbsoluteTime(wakeStart);
+                    DEBUG_LOG("WakeTime: Calendar resynced\n");
+                    updateCurrentWakeStart(wakeStartTimestamp);
+                    updateWakeTime();
+                }
             }
         }
         mach_msg_destroy(header);
@@ -1401,7 +1226,9 @@ kern_return_t _io_pm_last_wake_time(
     mach_msg_type_number_t  *out_delta_len,
     int                     *return_val)
 {
+    *out_wake_data = 0;
     *out_wake_len = 0;
+    *out_delta_data = 0;
     *out_delta_len = 0;
     *return_val = kIOReturnInvalid;
 
@@ -1410,10 +1237,12 @@ kern_return_t _io_pm_last_wake_time(
         return KERN_SUCCESS;
     }
 
+#if !TARGET_OS_IPHONE
     if (!gSMCSupportsWakeupTimer) {
         *return_val = kIOReturnNotFound;
         return KERN_SUCCESS;
     };
+#endif
 
     *out_wake_data = (vm_offset_t)gLastWakeTime;
     *out_wake_len = sizeof(*gLastWakeTime);
@@ -1426,6 +1255,7 @@ kern_return_t _io_pm_last_wake_time(
 }
 
 
+#if !TARGET_OS_IPHONE && !(TARGET_OS_OSX && TARGET_CPU_ARM64)
 /* displayMatched
  *
  * Notification fires when IODisplayWranger object is created in the IORegistry.
@@ -1482,6 +1312,7 @@ static void displayMatched(
 
 }
 
+#endif
 
 static void
 initializeShutdownNotifications(void)
@@ -1543,6 +1374,7 @@ initializeShutdownNotifications(void)
     dispatch_mach_connect(shutdownNotifChannel, our_port, MACH_PORT_NULL, NULL);
 }
 
+#if !TARGET_OS_IPHONE
 static void handleDWThermalMsg(CFStringRef wakeType)
 {
     CFMutableDictionaryRef options = NULL;
@@ -1552,7 +1384,9 @@ static void handleDWThermalMsg(CFStringRef wakeType)
 
     INFO_LOG("DarkWake Thermal Emergency message is received. BTWake: %d ssWake:%d ProxWake:%d NotificationWake:%d\n",
             isA_BTMtnceWake(), isA_SleepSrvcWake(), checkForAppWakeReason(CFSTR(kProximityWakeReason)), isA_NotificationDisplayWake());
+#if !(TARGET_OS_OSX && TARGET_CPU_ARM64)
     gateProximityDarkWakeState(kPMAllowSleep);
+#endif
     if ( (isA_BTMtnceWake() || isA_SleepSrvcWake() || checkForAppWakeReason(CFSTR(kProximityWakeReason))) &&
             (!isA_NotificationDisplayWake()) && (CFEqual(wakeType, kIOPMRootDomainWakeTypeMaintenance) ||
                         CFEqual(wakeType, kIOPMRootDomainWakeTypeSleepService))
@@ -1578,6 +1412,15 @@ static void handleDWThermalMsg(CFStringRef wakeType)
     }
 }
 
+__private_extern__ void evaluateDWThermalMsg(void)
+{
+    if (gEvaluateDWThermalEmergency) {
+        gEvaluateDWThermalEmergency = false;
+        handleDWThermalMsg(NULL);
+    }
+}
+#endif
+
 
 static void
 RootDomainInterest(
@@ -1587,7 +1430,9 @@ RootDomainInterest(
     void *messageArgument)
 {
     static CFStringRef  _uuidString = NULL;
+#if !TARGET_OS_IPHONE
     CFStringRef wakeReason = NULL, wakeType = NULL;
+#endif
 
     if (messageType == kIOPMMessageDriverAssertionsChanged)
     {
@@ -1617,37 +1462,20 @@ RootDomainInterest(
         PMSystemEventsRootDomainInterest();
     }
 
+#if !TARGET_OS_IPHONE
     if(messageType == kIOPMMessageDarkWakeThermalEmergency)
     {
         mt2RecordThermalEvent(kThermalStateSleepRequest);
         _darkWakeThermalEventCount++;
 
         getPlatformWakeReason(&wakeReason, &wakeType);
-        if (CFEqual(wakeReason, CFSTR("")) && CFEqual(wakeType, CFSTR("")))
+        if ((CFEqual(wakeReason, CFSTR("")) && CFEqual(wakeType, CFSTR(""))) || !isCapabilityChangeDone())
         {
             // Thermal emergency msg is received too early before wake type is
-            // determined. Delay the handler for a short handler until we know
-            // the wake type
-            if (gDWTMsgDispatch)
-                dispatch_suspend(gDWTMsgDispatch);
-            else {
-                gDWTMsgDispatch = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0,
-                        0, _getPMMainQueue());
-                dispatch_source_set_event_handler(gDWTMsgDispatch, ^{
-                    handleDWThermalMsg(NULL);
-                });
+            // determined. Delay the handler until capability changes are done
+            //
+            gEvaluateDWThermalEmergency = true;
 
-                dispatch_source_set_cancel_handler(gDWTMsgDispatch, ^{
-                    if (gDWTMsgDispatch) {
-                        dispatch_release(gDWTMsgDispatch);
-                        gDWTMsgDispatch = 0;
-                    }
-                });
-            }
-
-            dispatch_source_set_timer(gDWTMsgDispatch,
-                    dispatch_walltime(NULL, kDWTMsgHandlerDelay * NSEC_PER_SEC), DISPATCH_TIME_FOREVER, 0);
-            dispatch_resume(gDWTMsgDispatch);
         }
         else
         {
@@ -1663,6 +1491,7 @@ RootDomainInterest(
     {
         dispatch_async(_getPMMainQueue(), ^{ takeSpindump(); });
     }
+#endif
 
     if (messageType == kIOPMMessageFeatureChange)
     {
@@ -1704,10 +1533,28 @@ RootDomainInterest(
         }
     }
 
-    if (messageType == kIOPMMessageUserIsActiveChanged)
+    if (messageType == kIOPMMessageClamshellStateChange)
     {
-        userActiveHandleRootDomainActivity();
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+        INFO_LOG("Clamshell state changed\n");
+        dispatch_async(_getPMMainQueue(), ^{
+            updateClamshellState(messageArgument);
+        });
+#endif
     }
+
+#if (TARGET_OS_OSX && TARGET_CPU_ARM64)
+    if (messageType == kIOPMMessageRequestSystemShutdown)
+    {
+        INFO_LOG("Received system shutdown request\n");
+        dispatch_async(_getPMMainQueue(), ^{
+            int ret = reboot3(RB_HALT);
+            if (ret) {
+                INFO_LOG("Failed to shutdown system: %d (%s)", errno, strerror(errno));
+            }
+        });
+    }
+#endif
 }
 
 static void
@@ -1740,6 +1587,7 @@ exit:
     if(MACH_PORT_NULL != root_domain) IOObjectRelease(root_domain);
 }
 
+#if !TARGET_OS_IPHONE
 static void initializeUserNotifications(void)
 {
     SCDynamicStoreRef   localStore = _getSharedPMDynamicStore();
@@ -1799,6 +1647,7 @@ exit:
 
 }
 
+#endif
 static void initializeSleepWakeNotifications(void)
 {
     IONotificationPortRef           notify;

@@ -25,12 +25,14 @@
  *
  */
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreFoundation/CFPreferences_Private.h>
 #include <CoreFoundation/CFXPCBridge.h>
 #include <IOKit/pwr_mgt/IOPMLibPrivate.h>
 #include <IOKit/pwr_mgt/IOPMPrivate.h>
 #include <IOKit/IOReturn.h>
 #include <IOKit/pwr_mgt/IOPM.h>
 #include <IOKit/pwr_mgt/powermanagement_mig.h>
+#include <battery/battery.h>
 #include "BatteryTimeRemaining.h"
 
 #include <unistd.h>

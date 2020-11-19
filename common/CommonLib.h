@@ -157,6 +157,7 @@
 #define kPMASLDomainClientWakeRequests      "ClientWakeRequests"
 
 #define KPMASLWakeReqAppNamePrefix          "WakeAppName"
+#define kPMASLWakeReqTimePrefix             "WakeTime"
 #define kPMASLWakeReqTimeDeltaPrefix        "WakeTimeDelta"
 #define kPMASLWakeReqTypePrefix             "WakeType"
 #define kPMASLWakeReqClientInfoPrefix       "WakeClientInfo"
@@ -189,11 +190,8 @@ typedef struct {
 
 __private_extern__ const char *smcShutdownCauseString(int shutdownCause);
 
-extern long     physicalBatteriesCount;
-
 __private_extern__ io_registry_entry_t getRootDomain(void);
 __private_extern__ io_registry_entry_t getIOPMPowerSource(void);
-__private_extern__ int                  _batteryCount(void);
 
 __private_extern__ const char           *stringForLWCode(uint8_t code);
 __private_extern__ const char           *stringForPMCode(uint8_t code);

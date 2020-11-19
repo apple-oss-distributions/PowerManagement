@@ -256,8 +256,21 @@ static DTOption pmtool_options[] =
           required_argument, &args.doAction[kSetBHUpdateDeltaIndex], 1}, kActionType,
         "Set the minimum time delta required to change MaxCapacity in battery health. Not all devices require time delta between MaxCapacity updates.\n",
         { NULL }, {NULL}},
+    { {kActionGetBHDataFromPrefs,
+          no_argument, &args.doAction[kGetBHDataFromPrefsIndex], 1}, kActionType,
+        "Gets the persistent battery health data (CFPrefs for iOS) as an XML plist.\n",
+        { NULL }, {NULL}},
+    { {kActionGetAgingDataFromPrefs,
+          no_argument, &args.doAction[kGetAgingDataFromPrefsIndex], 1}, kActionType,
+        "Gets the aging controller data from CFPrefs and returns it as an XML plist.\n",
+        { NULL }, {NULL}},
+#if TARGET_OS_OSX
+    { {kActionGetVactSupported,
+          no_argument, &args.doAction[kGetVactSupportedIndex], 1}, kActionType,
+        "Gets whether or not VACT is supported on the device.\n",
+        { NULL }, {NULL}},
+#endif // TARGET_OS_OSX
     { {"help", no_argument, NULL, 'h'}, kNilType, NULL, { NULL }, { NULL } },
-
     { {NULL, 0, NULL, 0}, kNilType, NULL, { NULL }, { NULL } }
 };
 
@@ -305,8 +318,21 @@ int main(int argc, char *argv[])
         sendBHUpdateTimeDelta(args.nccpUpdateDelta);
         exit(1);
     }
+    if (args.doAction[kGetBHDataFromPrefsIndex]) {
+        sendBHDataFromCFPrefs();
+        exit(1);
+    }
+    if (args.doAction[kGetAgingDataFromPrefsIndex]) {
+        sendAgingDataFromCFPrefs();
+        exit(1);
+    }
+
 #if TARGET_OS_OSX
 
+    if (args.doAction[kGetVactSupportedIndex]) {
+        isVactSupported();
+        exit(1);
+    }
     if (args.doAction[kActionInactivityWindowIndex]) {
         sendInactivityWindowCommand(args.inactivityWindowStart,
                                     args.inactivityWindowDuration, args.standbyAccelerationDelay);
@@ -381,9 +407,33 @@ int main(int argc, char *argv[])
         doCreatePowerSource();
         printf("Press control-C to exit\n");
     }
-    
+
+
+    bool preventUserIdleSleep = (args.takeAssertionNamed == kIOPMAssertionTypePreventUserIdleSystemSleep ||
+            args.takeAssertionNamed == kIOPMAssertionTypePreventUserIdleDisplaySleep);
+    if (preventUserIdleSleep) {
+        // Validate if timeout is set
+        if (!args.assertionTimeoutSec) {
+            printf("Error: Prevent User Idle Sleep Assertion Types require a non-zero timeout\n");
+            exit(1);
+        }
+        // Wake system up
+        if (args.takeAssertionNamed == kIOPMAssertionTypePreventUserIdleDisplaySleep) {
+            printf("Create assertion %s\n", CFStringGetCStringPtr(kIOPMAssertionUserIsActive, kCFStringEncodingUTF8));
+            // This assertion is temporarily created for FullWake on macOS. Not used for PreventSystemSleep since if
+            // pmtool is being used, system is awake
+            execute_Assertion(kIOPMAssertionUserIsActive, 5);
+            sleep(2);
+        }
+    }
+
     if (args.doItWhen & kDoItNow) {
         executeTimedActions("Now");
+    }
+
+    if (preventUserIdleSleep) {
+        sleep((unsigned int)args.assertionTimeoutSec + 1);
+        exit(0);
     }
     
     if (args.sleepNow) {
@@ -503,7 +553,7 @@ static void usage(void)
 }
 
 static bool parse_it_all(int argc, char *argv[]) {
-    int                 optind;
+    int                 longindex = 0;
     char                ch = 0;
     struct option       *long_opts = NULL;
     int                 long_opts_count = 0;
@@ -517,14 +567,14 @@ static bool parse_it_all(int argc, char *argv[]) {
     args.assertionTimeoutSec = kAssertionTimeoutSec;
     
     long_opts = long_opts_from_pmtool_opts(&long_opts_count);
-    
+
+
     do {
-        ch = getopt_long(argc, argv, "hg", long_opts, &optind);
-        
-        if (optind > 0 && optind < long_opts_count) {
-            arg = (char *)long_opts[optind].name;
-        } else {
-            arg = NULL;
+        ch = getopt_long(argc, argv, "hg", long_opts, &longindex);
+
+        arg = NULL;
+        if (!ch && longindex >= 0 && longindex < long_opts_count - 1) {
+            arg = (char *)long_opts[longindex].name;
         }
         
         if (-1 == ch)
@@ -550,9 +600,6 @@ static bool parse_it_all(int argc, char *argv[]) {
                          || !strcmp(arg, kActionRequestSleepServiceWake))) {
             args.sleepIntervalSec = strtol(optarg, NULL, 10);
         }
-        else if (arg && !strcmp(arg, kOptionAssertionTimeout)) {
-            args.assertionTimeoutSec = strtol(optarg, NULL, 10);
-        }
         else if (arg && !strcmp(arg, kActionSetTCPKeepAliveExpirationTimeout)) {
             long temp_arg = strtol(optarg, NULL, 10);
             IOPMSetValueInt(kIOPMTCPKeepAliveExpirationOverride, (int)temp_arg);
@@ -573,7 +620,10 @@ static bool parse_it_all(int argc, char *argv[]) {
         }
         else
 #endif
-         if (arg && !strcmp(arg, kActionDoAckTimeout)) {
+        if (arg && !strcmp(arg, kOptionAssertionTimeout)) {
+            args.assertionTimeoutSec = strtol(optarg, NULL, 10);
+        }
+        else if (arg && !strcmp(arg, kActionDoAckTimeout)) {
             args.doAction[kDoAckTimeoutIndex] = 1;
             if (!strcmp(kArgIOPMConnection, optarg)) {
                 args.ackIOPMConnection = false;
@@ -630,7 +680,6 @@ static bool parse_it_all(int argc, char *argv[]) {
         else if (arg && !strcmp(arg, kActionSetBHUpdateDelta)) {
             args.nccpUpdateDelta = (int)strtol(optarg, NULL, 0);
         }
-        
     } while (1);
     
     
@@ -784,7 +833,13 @@ static DTAssertionOption *createAssertionOptions(int *count)
             "kIOPMAssertMaintenanceActivity"},
         {kIOPMAssertionTypeSystemIsActive,
             kAssertSystemIsActive,
-            "kIOPMAssertionTypeSystemIsActive"}
+            "kIOPMAssertionTypeSystemIsActive"},
+        {kIOPMAssertionTypePreventUserIdleSystemSleep,
+            kAssertPreventUserIdleSystemSleep,
+            "kIOPMAssertionTypePreventUserIdleSystemSleep"},
+        {kIOPMAssertionTypePreventUserIdleDisplaySleep,
+            kAssertPreventUserIdleDisplaySleep,
+            "kIOPMAssertionTypePreventUserIdleDisplaySleep"},
     };
     
     assertions_heap = calloc(1, sizeof(assertions_local));
@@ -897,7 +952,7 @@ static void execute_Assertion(CFStringRef type, long timeout)
     CFDictionaryRef     d = NULL;
     CFNumberRef         obj = NULL;
     int                 level;
-    
+
     ret = IOPMAssertionCreateWithDescription(
                                              type, CFSTR("com.apple.darkmaintenance"),
                                              NULL, NULL, NULL,
@@ -1166,6 +1221,7 @@ static CFDictionaryRef HandleBackgroundTaskCapabilitiesChanged(IOPMSystemPowerSt
         _CFDictionarySetDate(ackDictionary,
                              kIOPMAckTimerPluginWakeDate,
                              CFAbsoluteTimeGetCurrent() + (CFTimeInterval)args.sleepIntervalSec);
+        CFDictionarySetValue(ackDictionary, kIOPMAckClientInfoKey, CFSTR("com.apple.pmtool.backgroundtaskwake"));
     }
     return ackDictionary;
 }
@@ -1197,6 +1253,7 @@ static CFDictionaryRef HandleSleepServiceCapabilitiesChanged(IOPMSystemPowerStat
         _CFDictionarySetDate(ackDictionary,
                              kIOPMAckSleepServiceDate,
                              CFAbsoluteTimeGetCurrent() + (CFTimeInterval)args.sleepIntervalSec);
+        CFDictionarySetValue(ackDictionary, kIOPMAckClientInfoKey, CFSTR("com.apple.pmtool.sleepserviceswake"));
     }
     
     return ackDictionary;
@@ -1223,6 +1280,7 @@ static CFDictionaryRef HandleMaintenanceCapabilitiesChanged(IOPMSystemPowerState
         _CFDictionarySetLong(ackDictionary,
                              kIOPMAckSystemCapabilityRequirements,
                              (kIOPMCapabilityDisk | kIOPMCapabilityNetwork));
+        CFDictionarySetValue(ackDictionary, kIOPMAckClientInfoKey, CFSTR("com.apple.pmtool.maintenancewake"));
     }
     
     return ackDictionary;
@@ -1474,7 +1532,6 @@ static void cacheArgvString(int argc, char *argv[])
     {
         char tmp_buf[200];
         CFStringGetCString(g.invokedStr, tmp_buf, sizeof(tmp_buf), kCFStringEncodingUTF8);
-        printf("- pmtool: %s\n", tmp_buf);
     }
 }
 
@@ -1705,6 +1762,8 @@ exit:
 	return propertyList;
 }
 
-
 static void sendCustomBatteryProperties(char *path) {}
 static void sendBHUpdateTimeDelta(long timeDelta) {}
+static void sendBHDataFromCFPrefs(void){}
+static void sendAgingDataFromCFPrefs(void){}
+static void isVactSupported(){}

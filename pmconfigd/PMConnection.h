@@ -53,6 +53,12 @@ typedef struct {
 #define kPowerStateMask                 0xff
 
 
+#define IS_EMERGENCY_SLEEP(reason) \
+                ((CFEqual((reason), CFSTR(kIOPMLowPowerSleepKey)) ||  \
+                CFEqual((reason), CFSTR(kIOPMThermalEmergencySleepKey)) || \
+                ((getSystemThermalState() != kIOPMThermalLevelNormal) && \
+                 (getSystemThermalState() != kIOPMThermalLevelUnknown)))?true:false)
+
 __private_extern__ void PMConnection_prime(void);
 
 // PMAssertions.c calls into this when a PreventSystemSleep assertion is taken
@@ -74,6 +80,7 @@ __private_extern__ bool isA_DarkWakeState(void);
 __private_extern__ bool isA_NotificationDisplayWake(void);
 __private_extern__ void set_NotificationDisplayWake(void);
 __private_extern__ void cancel_NotificationDisplayWake(void);
+__private_extern__ bool isCapabilityChangeDone(void);
 
 __private_extern__ void InternalEvalConnections(void);
 __private_extern__ kern_return_t getPlatformSleepType(uint32_t *sleepType, uint32_t *standbyTimer);
@@ -83,6 +90,7 @@ __private_extern__ uint64_t getCurrentWakeTime(void);
 __private_extern__ void updateWakeTime(void);
 __private_extern__ void updateCurrentWakeStart(uint64_t timestamp);
 __private_extern__ void updateCurrentWakeEnd(uint64_t timestamp);
+__private_extern__ void getScheduledWake(xpc_object_t remote, xpc_object_t msg);
 
 __private_extern__ int getCurrentSleepServiceCapTimeout(void);
 /** Sets whether processes should get modified vm behavior for darkwake. */

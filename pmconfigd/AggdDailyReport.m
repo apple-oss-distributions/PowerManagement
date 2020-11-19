@@ -43,51 +43,54 @@ static void Process_IOReporter_Sample(CFMutableDictionaryRef newSample);
 
 void initializeAggdDailyReport(void)
 {
-    
     aggd_log = os_log_create(PM_LOG_SYSTEM, AGGD_REPORTS_LOG);
-    
+
     IOReporter_subscription =
     (struct IOReporter_client_subscription *)malloc(sizeof(struct IOReporter_client_subscription));
     //Make sure it is clean
     memset(IOReporter_subscription, 0, sizeof(struct IOReporter_client_subscription));
     //initialize the subscription
     IOReporter_subscription->subscription = IOReporter_subscription_init(&IOReporter_subscription->subscribed_channels);
-    
+
     if (IOReporter_subscription->subscription!=NULL)
     {
-    
         //allocate memory for sampling buffers
         IOReport_DailySample_Buffer =(struct IOReport_DailySample *)malloc(sizeof(struct IOReport_DailySample));
-      
+
         //make sure it is clean
         memset(IOReport_DailySample_Buffer, 0, sizeof(struct IOReport_DailySample));
-        
+
         //read the kernel value and update the buffer
         initializeDailySample();
-        
+
         gAggdMonitor = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _getPMMainQueue());
-        
+
         dispatch_source_set_event_handler(gAggdMonitor, ^{ submitAggdDailyReport(); });
-        
+
         dispatch_source_set_cancel_handler(gAggdMonitor, ^{
             dispatch_release(gAggdMonitor);
             gAggdMonitor = NULL;
         });
-        
+
         dispatch_source_set_timer(gAggdMonitor, dispatch_walltime(NULL, gAggdMonitorInterval), gAggdMonitorInterval, 0);
         dispatch_resume(gAggdMonitor);
     }
-    
 }
 
 static IOReportSubscriptionRef IOReporter_subscription_init(CFMutableDictionaryRef *subscribed_channels)
 {
     int channel_count = 0;
     IOReportIterationResult ires;
-    CFMutableDictionaryRef power_channels;
-    IOReportSubscriptionRef subscription=NULL;
-    power_channels = IOReportCopyChannelsInCategories(kIOReportCategoryPower,
-                                                      kIOReportOptGroupSubs, NULL);
+    CFMutableDictionaryRef power_channels = NULL;
+    IOReportSubscriptionRef subscription = NULL;
+    CFMutableDictionaryRef matchingDict = NULL;
+
+    matchingDict = IOServiceMatching("IOPMGR");
+    if (!matchingDict) {
+        goto exit;
+    }
+
+    power_channels = IOReportCopyChannelsForDrivers(matchingDict, kIOReportOptGroupSubs, NULL);
     if (power_channels == NULL)
     {
         ERROR_LOG("Power channel subscription error for aggd report\n");
@@ -95,7 +98,15 @@ static IOReportSubscriptionRef IOReporter_subscription_init(CFMutableDictionaryR
     }
     /* subscribe to only the CPU power part of the energy model: */
     ires = IOReportPrune(power_channels, (IOReportIteratorBlock)^(IOReportChannelRef ch) {
+        if ((IOReportChannelGetCategories(ch) & kIOReportCategoryPower) == 0) {
+            return kIOReportIterSkipped;
+        }
+
         CFStringRef chname = IOReportChannelGetChannelName(ch);
+        if (chname == NULL) {
+            ERROR_LOG("IOReportChannelName is NULL");
+            return kIOReportIterSkipped;;
+        }
         for(int index = 0 ; index < NO_DAILY_REPORT_EVENTS; index++)
         {
             if (CFStringCompare(chname, Daily_Report_Name_Keys.reportNameKeyBundle[index].name, kCFCompareCaseInsensitive) == kCFCompareEqualTo) {
@@ -123,6 +134,7 @@ static IOReportSubscriptionRef IOReporter_subscription_init(CFMutableDictionaryR
     }
 exit:
     if (power_channels) CFRelease(power_channels);
+    if (matchingDict) CFRelease(matchingDict);
     return subscription;
 }
 
