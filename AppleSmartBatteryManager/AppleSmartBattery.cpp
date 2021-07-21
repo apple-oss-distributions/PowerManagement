@@ -1283,6 +1283,12 @@ IOReturn AppleSmartBattery::transactionCompletionGated(struct transactionComplet
         break;
 
     case kAtCriticalLevelCmd:
+        if (_useAcForCritical) {
+            // set critical level based on AC status
+            BM_LOG2("Use AC state for critical battery\n");
+            val = !fACConnected;
+        }
+
         if (val == 1) {
             clock_sec_t secs;
             clock_usec_t microsecs;

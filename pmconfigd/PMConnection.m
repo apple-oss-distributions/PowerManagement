@@ -41,9 +41,7 @@
 #include <sys/syscall.h>
 #include <Kernel/kern/debug.h>
 #include <mach/mach_time.h>
-#if !TARGET_OS_IPHONE
 #include <libspindump_priv.h>
-#endif
 #include <CoreFoundation/CFXPCBridge.h>
 #if __has_include (<CoreAnalytics/CoreAnalytics.h>)
 #include <CoreAnalytics/CoreAnalytics.h>
@@ -63,10 +61,8 @@
 #include "PMAssertions.h"
 #include "PMStore.h"
 #include "SystemLoad.h"
-#if !TARGET_OS_IPHONE
 #include "TTYKeepAwake.h"
 #include "adaptiveDisplay.h"
-#endif
 #include "PMSettings.h"
 #include "Platform.h"
 #include "Platform.h"
@@ -125,7 +121,6 @@ CFAbsoluteTime              ts_apo = 0; // Time at which system should go for au
 static int const kMaxConnectionIDCount = 1000*1000*1000;
 static int const kConnectionOffset = 1000;
 static double const  kPMConnectionNotifyTimeoutDefault = 28.0;
-#if !TARGET_OS_IPHONE
 #if (TARGET_OS_OSX && TARGET_CPU_ARM64)
 static int kPMSleepDurationForBT = (15*60); // Defaults to 15 mins
 static int kPMDarkWakeLingerDuration = 5; // Defaults to 5 secs
@@ -143,7 +138,6 @@ static int                      gNotifySleepServiceToken = 0;
 static CFAbsoluteTime      ts_nextPowerNap = 0;
 // Timer to fire kPMSleepDurationForBT after sleep to update capabilities if needed
 static dispatch_source_t gDarkWakeCapabilitiesCheckTimer = 0;
-#endif
 static int gIdleSleepPreventersToken = 0;
 static int gSystemSleepPreventersToken = 0;
 uint64_t lastcall_ts = 0;
@@ -282,9 +276,7 @@ static void cleanupResponseWrangler(PMResponseWrangler *reap);
 
 static void setSystemSleepStateTracking(IOPMCapabilityBits);
 
-#if !TARGET_OS_IPHONE
 static void scheduleSleepServiceCapTimerEnforcer(uint32_t cap_ms);
-#endif
 
 /* Hide SleepServices code for public OS seeds. 
  * We plan to re-enable this code for shipment.
@@ -292,9 +284,7 @@ static void scheduleSleepServiceCapTimerEnforcer(uint32_t cap_ms);
  */
 
 #if LOG_SLEEPSERVICES
-#if !TARGET_OS_IPHONE
 static void logASLMessageSleepServiceBegins(long withCapTime);
-#endif
 __private_extern__ void logASLMessageSleepServiceTerminated(int forcedTimeoutCnt);
 #endif
 
@@ -466,10 +456,8 @@ void PMConnection_prime()
     if (rdProps) {
         CFRelease(rdProps);
     }
-#if !TARGET_OS_IPHONE
     // Make sure we don't get stuck with the VM dark mode enabled.
     setVMDarkwakeMode(false);
-#endif
 
     return;
 
@@ -641,7 +629,6 @@ kern_return_t _io_pm_connection_release
  * Helper function to improve readability of connection_acknowledge_event
  */
 
-#if !TARGET_OS_IPHONE
 static PMResponse *_io_pm_acknowledge_event_findOutstandingResponseForToken(PMConnection *connection, int token)
 {
     CFMutableArrayRef   responsesTrackingList = NULL;
@@ -705,7 +692,6 @@ static CFDictionaryRef _io_pm_connection_acknowledge_event_unpack_payload(
     
     return ackOptionsDict;
 }
-#endif
 
 static void cacheResponseStats(PMResponse *resp)
 {
@@ -775,9 +761,6 @@ kern_return_t _io_pm_connection_acknowledge_event
  int *return_code
  )
 {
-#if TARGET_OS_IPHONE
-	return KERN_FAILURE;
-#else
     PMConnection        *connection = connectionForID(connection_id);
     PMResponse          *foundResponse = NULL;
     
@@ -834,7 +817,6 @@ kern_return_t _io_pm_connection_acknowledge_event
          *
          * kIOPMAckDHCPRenewWakeDate
          */
-#if !TARGET_OS_IPHONE
         requestDate = isA_CFDate(CFDictionaryGetValue(ackOptionsDict, kIOPMAckDHCPRenewWakeDate));
         CFDateRef  requestBeaconDate = isA_CFDate(CFDictionaryGetValue(ackOptionsDict, kIOPMAckLimitedPowerWakeDate));
 
@@ -855,7 +837,6 @@ kern_return_t _io_pm_connection_acknowledge_event
             }
         }
         else {
-#endif
             /*
              * Caller requests a maintenance wake. These schedule on AC only.
              *
@@ -877,9 +858,7 @@ kern_return_t _io_pm_connection_acknowledge_event
             {
                 foundResponse->maintenanceRequested = CFDateGetAbsoluteTime(requestDate);
             }
-#if !TARGET_OS_IPHONE
         }
-#endif
 
         /* kIOPMAckBackgroundTaskWakeDate
          *      - Timer plugin uses this to schedule DWBT timed work.
@@ -896,10 +875,8 @@ kern_return_t _io_pm_connection_acknowledge_event
             }
 
             foundResponse->timerPluginRequested = CFDateGetAbsoluteTime(requestDate);
-#if !TARGET_OS_IPHONE
             if ( foundResponse->timerPluginRequested < ts_nextPowerNap )
                 foundResponse->timerPluginRequested = ts_nextPowerNap;
-#endif
         }
         
         /* kIOPMAckAppRefreshWakeDate
@@ -917,10 +894,8 @@ kern_return_t _io_pm_connection_acknowledge_event
             }
 
             foundResponse->sleepServiceRequested = CFDateGetAbsoluteTime(requestDate);
-#if !TARGET_OS_IPHONE
             if ( foundResponse->sleepServiceRequested < ts_nextPowerNap )
                 foundResponse->sleepServiceRequested = ts_nextPowerNap;
-#endif
         }
 skip:
         CFRelease(ackOptionsDict);
@@ -933,7 +908,6 @@ exit:
     vm_deallocate(mach_task_self(), options_ptr, options_len);
     
     return KERN_SUCCESS;
-#endif
 }
 
 kern_return_t _io_pm_get_capability_bits(
@@ -1009,7 +983,6 @@ kern_return_t _io_pm_set_bt_wake_interval
 )
 {
     *oldInterval = 0;
-#if !TARGET_OS_IPHONE
     pid_t               callerPID = -1;
     uid_t               callerUID = -1;
     gid_t               callerGID = -1;
@@ -1024,17 +997,13 @@ kern_return_t _io_pm_set_bt_wake_interval
     if (oldInterval)
        *oldInterval = kPMSleepDurationForBT;
     kPMSleepDurationForBT = newInterval;
-#endif
 
     *return_code = kIOReturnSuccess;
 
-#if !TARGET_OS_IPHONE
 exit:
-#endif
     return KERN_SUCCESS;
 }
 
-#if !TARGET_OS_IPHONE
 int getBTWakeInterval()
 {
     return kPMSleepDurationForBT;
@@ -1049,7 +1018,6 @@ void setDwlInterval(uint32_t interval)
     }
     kPMDarkWakeLingerDuration = interval;
 }
-#endif
 
 kern_return_t _io_pm_set_dw_linger_interval
 (
@@ -1059,7 +1027,6 @@ kern_return_t _io_pm_set_dw_linger_interval
     int         *return_code
 )
 {
-#if !TARGET_OS_IPHONE
     pid_t               callerPID = -1;
     uid_t               callerUID = -1;
     gid_t               callerGID = -1;
@@ -1080,9 +1047,6 @@ kern_return_t _io_pm_set_dw_linger_interval
         CFRelease(numRef);
     }
 exit:
-#else
-    *return_code = kIOReturnUnsupported;
-#endif
 
     return KERN_SUCCESS;
 }
@@ -1297,7 +1261,6 @@ kern_return_t _io_pm_set_sleepservice_wake_time_cap(
     int                 cap_ms,
     int                 *return_code)
 {
-#if !TARGET_OS_IPHONE
     pid_t               callerPID = -1;
     uid_t               callerUID = -1;
     gid_t               callerGID = -1;
@@ -1317,12 +1280,10 @@ kern_return_t _io_pm_set_sleepservice_wake_time_cap(
     }
     gSleepService.capTime = cap_ms;
    setSleepServicesTimeCap(cap_ms);
-#endif
    *return_code = kIOReturnSuccess;
    return KERN_SUCCESS;
 }
 
-#if !TARGET_OS_IPHONE
 static void scheduleSleepServiceCapTimerEnforcer(uint32_t cap_ms) 
 {
     if(!cap_ms)
@@ -1433,7 +1394,6 @@ void cancelDarkWakeCapabilitiesTimer()
     }
 
 }
-#endif
 
 
 #if LOG_SLEEPSERVICES
@@ -1442,7 +1402,6 @@ void cancelDarkWakeCapabilitiesTimer()
 /* LOG ASL MESSAGE SLEEPSERVICE - Begins */
 /*****************************************************************************/
 
-#if !TARGET_OS_IPHONE
 
 static void logASLMessageSleepServiceBegins(long withCapTime)
 {
@@ -1476,7 +1435,6 @@ static void logASLMessageSleepServiceBegins(long withCapTime)
     asl_send(NULL, m);
     asl_release(m);
 }
-#endif
 
 /*****************************************************************************/
 /* LOG ASL MESSAGE SLEEPSERVICE - Terminated*/
@@ -1640,7 +1598,6 @@ __private_extern__ bool isCapabilityChangeDone()
 __private_extern__ void cancelPowerNapStates( )
 {
 
-#if !TARGET_OS_IPHONE
     if (isA_SleepSrvcWake()) {
         gSleepService.capTime = 0;
         setSleepServicesTimeCap(0);
@@ -1653,7 +1610,6 @@ __private_extern__ void cancelPowerNapStates( )
 
     SystemLoadSystemPowerStateHasChanged( );
 
-#endif
 }
 
 /*****************************************************************************/
@@ -1849,7 +1805,6 @@ void evalForPSChange( )
 
     prevPwrSrc = pwrSrc;
 
-#if !TARGET_OS_IPHONE
     if (gSleepService.capTime != 0 &&
         isA_SleepSrvcWake()) {
         int capTimeout = getCurrentSleepServiceCapTimeout();
@@ -1863,7 +1818,6 @@ void evalForPSChange( )
     if ((pwrSrc == kACPowered) && gApoDispatch ) {
         setAutoPowerOffTimer(false, 0);
     }
-#endif
 }
 
 __private_extern__ void InternalEvalConnections(void)
@@ -1879,9 +1833,7 @@ static void handleLastCallMsg(void *messageData, CFStringRef sleepReason)
     bool sys_active = false;
     bool pending_wakes = false;
 
-#if !TARGET_OS_IPHONE
     tcpka_active = ((getTCPKeepAliveState(NULL, 0) == kActive) && checkForActivesByType(kInteractivePushServiceType));
-#endif
 
     sys_active = checkForActivesByType(kDeclareSystemActivityType);
     pending_wakes = (CFStringCompare(sleepReason, CFSTR(kIOPMIdleSleepKey), 0) == kCFCompareEqualTo) &&
@@ -1890,13 +1842,11 @@ static void handleLastCallMsg(void *messageData, CFStringRef sleepReason)
     if( tcpka_active || sys_active || pending_wakes)
     {
         logASLMessageSleepCanceledAtLastCall(tcpka_active, sys_active, pending_wakes);
-#if !TARGET_OS_IPHONE
         /* Log all assertions that could have canceled sleep */
         dispatch_async(_getPMMainQueue(), ^{
             logASLAssertionTypeSummary(kInteractivePushServiceType);
             logASLAssertionTypeSummary(kDeclareSystemActivityType);
         });
-#endif
 
         IOCancelPowerChange(gRootDomainConnect, (long)messageData);
     }
@@ -1915,10 +1865,8 @@ static void handleCanSleepMsg(void *messageData, CFStringRef sleepReason)
     bool idle_sleep = false;
 
     idle_sleep = (CFStringCompare(sleepReason, CFSTR(kIOPMIdleSleepKey), 0) == kCFCompareEqualTo);
-#if !TARGET_OS_IPHONE
     /* Check for active TTYs due to ssh sessiosn */
     allow_sleep = TTYKeepAwakeConsiderAssertion( );
-#endif        
     if (allow_sleep && idle_sleep) {
         if (!isA_DarkWakeState()) {
             // If idle sleep and transition is from full wake -> darkwake
@@ -2051,7 +1999,6 @@ static void handleSleepPreventersMsg(natural_t msg, void *messageData)
     }
 }
 
-#if !TARGET_OS_IPHONE
 static bool dwLinger(CFStringRef sleepReason)
 {
 
@@ -2116,7 +2063,6 @@ void setVMDarkwakeMode(bool darkwakeMode)
     INFO_LOG("vm.darkwake_mode: %i -> %i", oldValue, newValue);
 }
 
-#endif
 
 void updateWakeTime()
 {
@@ -2202,10 +2148,8 @@ static void PMConnectionPowerCallBack(
     static bool slp_logd = false;
     static bool s02dw_logd = false;
     static bool slp2dw_logd = false;
-#if !TARGET_OS_IPHONE
     static IOPMAssertionID requestUserActiveID = kIOPMNullAssertionID;
     CFArrayRef appStats = NULL;
-#endif
     CFStringRef wakeType = CFSTR("");
     CFStringRef wakeReason = CFSTR("");
 
@@ -2252,13 +2196,11 @@ static void PMConnectionPowerCallBack(
     {
         char *reason = (char *)messageData;
         INFO_LOG("Request user active from kernel driver %s", reason);
-#if !TARGET_OS_IPHONE
         CFStringRef description = CFStringCreateWithFormat(kCFAllocatorDefault, NULL, CFSTR("com.apple.powermanagement.kernel.useractive %s"), reason);
         if (description) {
             InternalDeclareUserActive(description, &requestUserActiveID);
             CFRelease(description);
         }
-#endif // !TARGET_OS_IPHONE
         return;
     }
     else if (kIOMessageSystemCapabilityChange != inMessageType)
@@ -2312,7 +2254,6 @@ static void PMConnectionPowerCallBack(
 #endif
 
         _resetWakeReason();
-#if !TARGET_OS_IPHONE
         // If this is a non-SR wake, set next earliest PowerNap wake point to
         // after 'kPMSleepDurationForBT' secs.
         // For all other wakes, don't move the next PowerNap wake point.
@@ -2347,7 +2288,6 @@ static void PMConnectionPowerCallBack(
 
         setStandbyTimer();
         resetSessionUserActivity();
-#endif
 
         // Clear gPowerState and set it to kSleepState
         // We will clear kDarkWakeForSSState bit later when the SS session is closed.
@@ -2367,9 +2307,7 @@ static void PMConnectionPowerCallBack(
         recordFDREvent(kFDRBattEventAsync, false);
         recordFDREvent(kFDRSleepEvent, false);
 
-#if !TARGET_OS_IPHONE
         evaluateADS();
-#endif
         if(smcSilentRunningSupport() )
            gCurrentSilentRunningState = kSilentRunningOn;
 
@@ -2411,7 +2349,6 @@ static void PMConnectionPowerCallBack(
         gPowerState |= kDarkWakeState;
         gPowerState &= ~(kNotificationDisplayWakeState|kFullWakeState);
 
-#if !TARGET_OS_IPHONE
 
         bool linger = false;
         bool blockedInS0 = systemBlockedInS0Dark();
@@ -2441,7 +2378,6 @@ static void PMConnectionPowerCallBack(
         sendNoRespNotification(deliverCapabilityBits);
 		SPNotifyLeavingFullWake();
 
-#endif
     } else if (SYSTEM_DID_WAKE(capArgs))
     {
         _updateWakeReason(&wakeReason, &wakeType);
@@ -2494,7 +2430,6 @@ static void PMConnectionPowerCallBack(
         {
 
             // e.g. System has powered into full wake
-#if !TARGET_OS_IPHONE
 
             // Unclamp SilentRunning if this full wake is not due to Notification display
             if (CFEqual(wakeType, kIOPMRootDomainWakeTypeNotification)) {
@@ -2514,10 +2449,6 @@ static void PMConnectionPowerCallBack(
                 gPowerState |= kFullWakeState;
             }
             cancelAutoPowerOffTimer();
-#else
-            gPowerState &= ~(kPowerStateMask ^ kDarkWakeForSSState);
-            gPowerState |= kFullWakeState;
-#endif
             deliverCapabilityBits |=
                     kIOPMCapabilityCPU | kIOPMCapabilityDisk 
                     | kIOPMCapabilityNetwork | kIOPMCapabilityAudio | kIOPMCapabilityVideo;
@@ -2546,9 +2477,7 @@ static void PMConnectionPowerCallBack(
             gCapabilityChangeDone = true;
             gCurrentWakeTime = 0;
             updateWakeTime();
-#if !TARGET_OS_IPHONE
             evaluateDWThermalMsg();
-#endif
 
         } else if (IS_CAP_GAIN(capArgs, kIOPMSystemCapabilityCPU))
         {
@@ -2567,7 +2496,6 @@ static void PMConnectionPowerCallBack(
             _ProxyAssertions(capArgs);
             cur_time = CFAbsoluteTimeGetCurrent();
             
-#if !TARGET_OS_IPHONE
             setVMDarkwakeMode(true);
 
             /* True powernap wake is either Maintenance or SleepService wake
@@ -2639,7 +2567,6 @@ static void PMConnectionPowerCallBack(
             }
 
             evaluateADS();
-#endif
             if (gApoDispatch && ts_apo && (cur_time > ts_apo - kAutoPowerOffSleepAhead) ) {
                 /* Check for auto-power off if required */
                 dispatch_suspend(gApoDispatch);
@@ -2657,13 +2584,10 @@ static void PMConnectionPowerCallBack(
             gCapabilityChangeDone = true;
             gCurrentWakeTime = 0;
             updateWakeTime();
-#if !TARGET_OS_IPHONE
             evaluateDWThermalMsg();
-#endif
 
         }
 
-#if !TARGET_OS_IPHONE
         if ((kACPowered == _getPowerSource()) && (kPMDarkWakeLingerDuration != 0)
             && (IS_CAP_GAIN(capArgs, kIOPMSystemCapabilityCPU))) {
             CFMutableDictionaryRef assertionDescription = NULL;
@@ -2678,7 +2602,6 @@ static void PMConnectionPowerCallBack(
             CFRelease(assertionDescription);
         }
 
-#endif
 
         // Send an async notify out - clients include SCNetworkReachability API's; no ack expected
         setSystemSleepStateTracking(deliverCapabilityBits);
@@ -2691,7 +2614,6 @@ static void PMConnectionPowerCallBack(
         if (capArgs->notifyRef)
             IOAllowPowerChange(gRootDomainConnect, (long)capArgs->notifyRef);     
                    
-#if !TARGET_OS_IPHONE
         SystemLoadSystemPowerStateHasChanged( );
 
         // Get stats on delays while waking up. This includes delays from previous sleep
@@ -2701,17 +2623,14 @@ static void PMConnectionPowerCallBack(
             logASLMessageAppStats(appStats, kPMASLDomainKernelClientStats);
             CFRelease(appStats);
         }
-#endif
         return;
     }
     else if (SYSTEM_WILL_WAKE(capArgs) )
     {
         gEmergencySleep = false;
-#if !TARGET_OS_IPHONE
         // reset delta to standby
         resetDeltaToStandby();
         refreshStandbyInactivityPrediction();
-#endif
         gMachineStateRevertible = true;
 
         gPowerState = kDarkWakeState;
@@ -2983,12 +2902,10 @@ static void cleanClientResponses(PMResponseWrangler *responseWrangler, bool time
 {
     PMResponse      *one_response = NULL;
     CFIndex         i, responsesCount = 0;
-#if !TARGET_OS_IPHONE
     char            appName[32];
     char            pidbuf[64];
 
     pidbuf[0] = 0;
-#endif
 
     if (!responseWrangler)
         return;
@@ -3019,13 +2936,11 @@ static void cleanClientResponses(PMResponseWrangler *responseWrangler, bool time
         
         cacheResponseStats(one_response);
 
-#if !TARGET_OS_IPHONE
         if (isA_CFString(one_response->connection->callerName) &&
                 CFStringGetCString(one_response->connection->callerName, appName, sizeof(appName), kCFStringEncodingUTF8))
             snprintf(pidbuf, sizeof(pidbuf), "%s %s(%d)",pidbuf, appName, one_response->connection->callerPID);
         else
             snprintf(pidbuf, sizeof(pidbuf), "%s (%d)",pidbuf, one_response->connection->callerPID );
-#endif
     }
 
     checkResponses(responseWrangler);
@@ -3332,7 +3247,6 @@ static bool checkResponses_ScheduleWakeEvents(PMResponseWrangler *wrangler)
         // Make sure that wake request is at least 1 min from now
         earliestWake = (CFAbsoluteTimeGetCurrent()+60);
     }
-#if !TARGET_OS_IPHONE
 
     CFAbsoluteTime ts_tcpka_turnoff = getTcpkaTurnOffTime();
     if (validScheduledDate(ts_tcpka_turnoff, getpid())) {
@@ -3365,7 +3279,6 @@ static bool checkResponses_ScheduleWakeEvents(PMResponseWrangler *wrangler)
         ssWakeReq = false;
         chosenReq = -1;
     }
-#endif
 #endif
 
     /* Check for user wake requests in the end to give highest priority, in case of conflict */
@@ -3467,18 +3380,6 @@ static bool checkResponses_ScheduleWakeEvents(PMResponseWrangler *wrangler)
         CFRelease(event);
     }
 
-#ifndef TARGET_OS_IPHONE
-    uint32_t thermalLevel = getSystemThermalLevel();
-    if ((thermalLevel == kIOPMThermalLevelWarning) || (thermalLevel == kIOPMThermalLevelTrap)) {
-        // Ignore darkwake requests and user wake requests when thermal state is warning/trap
-        earliestWake = kCFAbsoluteTimeIntervalSince1904;
-        userWakeReq = ssWakeReq = false;
-        if (gPendingScheduledWakeLog) {
-            CFRelease(gPendingScheduledWakeLog);
-            gPendingScheduledWakeLog = NULL;
-        }
-    }
-#endif
 
     if (ts_apo != 0) {
         // Report existence of user wake request or SS request to IOPPF(thru rootDomain)
@@ -3561,13 +3462,11 @@ static void checkResponses(PMResponseWrangler *wrangler)
         return;
     }
 
-#if !TARGET_OS_WATCH
     if (wrangler->responseStats) {
         logASLMessageAppStats(wrangler->responseStats, kPMASLDomainPMClientStats);
         CFRelease(wrangler->responseStats);
         wrangler->responseStats = NULL;
     }
-#endif
 
     // Completion: all clients have acknowledged.
     if (wrangler->awaitingResponsesTimeout) {
@@ -3865,7 +3764,6 @@ __private_extern__ io_connect_t getRootDomainConnect()
  * Returns the per-platform sleep service cap timeout for the current power
  * source in milliseconds
  */
-#if !TARGET_OS_IPHONE
 __private_extern__ int getCurrentSleepServiceCapTimeout()
 {
     static int acCapTimeout     = -1;
@@ -3955,7 +3853,6 @@ __private_extern__ int getCurrentSleepServiceCapTimeout()
 
     return currentCap;
 }
-#endif
 
 __private_extern__ void getScheduledWake(xpc_object_t remote, xpc_object_t msg) {
     if (!remote || !msg) {

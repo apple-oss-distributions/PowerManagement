@@ -106,6 +106,10 @@ __private_extern__ CFDictionaryRef CF_RETURNS_RETAINED getActiveUPSDictionary(vo
 __private_extern__ void batteryTimeRemaining_setCustomBatteryProps(CFDictionaryRef batteryProps);
 __private_extern__ void batteryTimeRemaining_resetCustomBatteryProps(void);
 
+#define kBHCalibrationFlagsKey      "calibrationFlags"
+#define kBHCalibration0Key          "calibration0"
+#define kBHCalibration1Key          "calibration1"
+
 // needed to untanble some cross calls, please don't expand usage of it
 __private_extern__ dispatch_queue_t BatteryTimeRemaining_getQ(void);
 

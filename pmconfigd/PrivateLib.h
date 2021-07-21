@@ -99,6 +99,7 @@
 #define ADAPTIVEDISPLAY_LOG "adaptiveDisplay"
 #define WAKEREQUESTS_LOG    "wakeRequests"
 #define DISPLAY_LOG         "displayState"
+#define PREFS_LOG           "prefs"
 
 #ifndef LOG_STREAM
 #define LOG_STREAM OS_LOG_DEFAULT

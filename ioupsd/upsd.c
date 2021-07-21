@@ -554,12 +554,14 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
                 goto UPSDEVICEADDED_FAIL;
             
             if (upsDataRef->deviceType == kDeviceTypeBatteryCase) {
-                // Initialize AC state manually according to the default value.
-                // If a UPS is not on battery power, this will get fixed in the
-                // first ProcessUPSEvent call below
-                upsDataRef->hasACPower = false;
-                BatteryCaseHandleACStateChange(upsDataRef, CFSTR(kIOPSBatteryPowerValue));
-                
+                if (!needsMerge) {
+                    // Initialize AC state manually according to the default value.
+                    // If a UPS is not on battery power, this will get fixed in the
+                    // first ProcessUPSEvent call below
+                    upsDataRef->hasACPower = false;
+                    BatteryCaseHandleACStateChange(upsDataRef, CFSTR(kIOPSBatteryPowerValue));
+                }
+
                 // Register for interest in battery state changes to update
                 // battery cases on our state of charge
                 io_service_t chargerService = GetIOPMPS();
@@ -758,17 +760,32 @@ kern_return_t BatteryCaseSetDeviceCurrentLimit(CFTypeRef currentLimitRef) {
 void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event)
 {
     long count, index;
-    
+
     if (!upsDataRef || !event)
         return;
-    
-    if ((count = CFDictionaryGetCount(event))) {
+
+    CFMutableDictionaryRef mutableEvent = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, event);
+    if (!mutableEvent) {
+        return;
+    }
+
+    if (upsDataRef->deviceType == kDeviceTypeBatteryCase &&
+        upsDataRef->requiresCurrentLimitControl &&
+        !upsDataRef->hasACPower) {
+        // inject kIOPSAppleBatteryCaseAvailableCurrentKey if not already in dict
+        if (!CFDictionaryGetValue(mutableEvent, CFSTR(kIOPSAppleBatteryCaseAvailableCurrentKey))) {
+            CFDictionarySetValue(mutableEvent, CFSTR(kIOPSAppleBatteryCaseAvailableCurrentKey),
+                                 CFDictionaryGetValue(upsDataRef->upsStoreDict, CFSTR(kIOPSAppleBatteryCaseAvailableCurrentKey)));
+        }
+    }
+
+    if ((count = CFDictionaryGetCount(mutableEvent))) {
         CFTypeRef *keys     = (CFTypeRef *) malloc(sizeof(CFTypeRef) * count);
         CFTypeRef *values   = (CFTypeRef *) malloc(sizeof(CFTypeRef) * count);
-        
-        CFDictionaryGetKeysAndValues(event, (const void **)keys,
+
+        CFDictionaryGetKeysAndValues(mutableEvent, (const void **)keys,
                                      (const void **)values);
-        
+
         for (index = 0; index < count; index++) {
             // If a battery case changes from "unplugged" to "plugged in",
             // or vice versa, we need to configure it.
@@ -791,20 +808,22 @@ void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event)
                        !upsDataRef->hasACPower) {
                 BatteryCaseSetDeviceCurrentLimit(values[index]);
             }
-            
+
             CFDictionarySetValue(upsDataRef->upsStoreDict, keys[index],
                                  values[index]);
         }
-        
+
         free (keys);
         free (values);
-        
+
         IOReturn result = IOPSSetPowerSourceDetails(upsDataRef->powerSourceID,
                                                     upsDataRef->upsStoreDict);
         if (result != kIOReturnSuccess) {
             ERROR_LOG("updating power source details failed\n");
         }
     }
+
+    CFRelease(mutableEvent);
 }
 
 
@@ -1030,14 +1049,18 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
     //
     upsName = (CFStringRef) CFDictionaryGetValue(properties,
                                                  CFSTR(kIOPSNameKey));
-    if (!upsName) {
-        upsName = CFSTR(kDefaultUPSName);
+    if (upsName) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSNameKey), upsName);
+    } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSNameKey))) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSNameKey), CFSTR(kDefaultUPSName));
     }
 
     transport = (CFStringRef) CFDictionaryGetValue(properties,
                                                    CFSTR(kIOPSTransportTypeKey));
-    if (!transport) {
-        transport = CFSTR(kDefaultTransport);
+    if (transport) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), transport);
+    } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSTransportTypeKey))) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), CFSTR(kDefaultTransport));
     }
 
     vid = (CFNumberRef) CFDictionaryGetValue(properties,
@@ -1046,26 +1069,25 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
                                              CFSTR(kIOPSProductIDKey));
     modelNum = (CFNumberRef) CFDictionaryGetValue(properties,
                                                   CFSTR(kIOPSModelNumber));
-    CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSNameKey), upsName);
-    CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), transport);
+
     CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsPresentKey), kCFBooleanTrue);
     if (upsDataRef->deviceType == kDeviceTypeUPS) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanTrue);
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSACPowerValue));
     } else {
-        if (CFDictionaryContainsKey(properties, CFSTR(kIOPSIsChargingKey))) {
-            CFBooleanRef boolean = (CFBooleanRef) CFDictionaryGetValue(properties,
-                                                                       CFSTR(kIOPSIsChargingKey));
+        CFBooleanRef boolean = (CFBooleanRef) CFDictionaryGetValue(properties,
+                                                                 CFSTR(kIOPSIsChargingKey));
+        if (boolean) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), boolean);
-        } else {
+        } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSIsChargingKey))) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
         }
 
-        if (CFDictionaryContainsKey(properties, CFSTR(kIOPSPowerSourceStateKey))) {
-            CFStringRef string = (CFStringRef) CFDictionaryGetValue(properties,
-                                                                    CFSTR(kIOPSPowerSourceStateKey));
+        CFStringRef string = (CFStringRef) CFDictionaryGetValue(properties,
+                                                                CFSTR(kIOPSPowerSourceStateKey));
+        if (string) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), string);
-        } else {
+        } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey))) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSBatteryPowerValue));
         }
     }
@@ -1086,11 +1108,11 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
     CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceIDKey), number);
     CFRelease(number);
 
-    if (CFDictionaryContainsKey(properties, CFSTR(kIOPSMaxCapacityKey))) {
-        number = (CFNumberRef) CFDictionaryGetValue(properties,
-                                                    CFSTR(kIOPSMaxCapacityKey));
+    number = (CFNumberRef) CFDictionaryGetValue(properties,
+                                                CFSTR(kIOPSMaxCapacityKey));
+    if (number) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSMaxCapacityKey), number);
-    } else {
+    } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSMaxCapacityKey))) {
         if (upsDataRef->deviceType == kDeviceTypeBatteryCase || upsDataRef->deviceType == kDeviceTypeGameController) {
             // rdar://problem/21817316 Initialize battery cases to a max capacity
             // of 0 so they don't show up in UI until we've received the correct
@@ -1121,7 +1143,7 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
             number = (CFNumberRef) CFDictionaryGetValue(properties,
                                                         CFSTR(kIOPSCurrentCapacityKey));
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSCurrentCapacityKey), number);
-        } else {
+        } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSCurrentCapacityKey))) {
             elementValue = 0;
             number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
                                     &elementValue);
