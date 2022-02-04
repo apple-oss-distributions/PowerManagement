@@ -60,6 +60,8 @@ struct args_struct {
     long    standbyAccelerationDelay;
     char    *batteryPropsPath;
     long    nccpUpdateDelta;
+    int     lowPowerMode;
+    int64_t pfStatus;
     
     /* If takeAssertionNamed != NULL; that implies our action is to take an assertion */
     CFStringRef         takeAssertionNamed;
@@ -269,6 +271,10 @@ static DTOption pmtool_options[] =
           no_argument, &args.doAction[kGetVactSupportedIndex], 1}, kActionType,
         "Gets whether or not VACT is supported on the device.\n",
         { NULL }, {NULL}},
+    { {kActionSetPermFaultStatus,
+          required_argument, &args.doAction[kSetPermFaultStatusIndex], 1}, kActionType,
+        "Sets the permanent fault status of the battery to the specified value.\n",
+        { NULL }, {NULL}},
 #endif // TARGET_OS_OSX
     { {"help", no_argument, NULL, 'h'}, kNilType, NULL, { NULL }, { NULL } },
     { {NULL, 0, NULL, 0}, kNilType, NULL, { NULL }, { NULL } }
@@ -326,11 +332,14 @@ int main(int argc, char *argv[])
         sendAgingDataFromCFPrefs();
         exit(1);
     }
-
 #if TARGET_OS_OSX
 
     if (args.doAction[kGetVactSupportedIndex]) {
         isVactSupported();
+        exit(1);
+    }
+    if (args.doAction[kSetPermFaultStatusIndex]) {
+        setPermFaultStatus(args.pfStatus);
         exit(1);
     }
     if (args.doAction[kActionInactivityWindowIndex]) {
@@ -441,7 +450,7 @@ int main(int argc, char *argv[])
         printf("Will force sleep the system with IOPMSleepSystem in %d seconds.\n", (int)delayInSeconds);
         dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayInSeconds * NSEC_PER_SEC));
         dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
-            io_connect_t connect = IOPMFindPowerManagement(kIOMasterPortDefault);
+            io_connect_t connect = IOPMFindPowerManagement(kIOMainPortDefault);
             IOReturn ret = IOPMSleepSystem(connect);
             if (kIOReturnSuccess != ret) {
                 printf("Error: Couldn't put the system to sleep. IOPMSleepSystem() returns error 0x%08x\n", ret);
@@ -679,6 +688,9 @@ static bool parse_it_all(int argc, char *argv[]) {
         }
         else if (arg && !strcmp(arg, kActionSetBHUpdateDelta)) {
             args.nccpUpdateDelta = (int)strtol(optarg, NULL, 0);
+        }
+        else if (arg && !strcmp(arg, kActionSetPermFaultStatus)) {
+            args.pfStatus = (int64_t) strtol(optarg, NULL, 0);
         }
     } while (1);
     
@@ -1438,7 +1450,7 @@ static void bringTheHeat(void)
 #if TARGET_OS_OSX
 static void sleepHandler(int sleepType)
 {
-    io_connect_t connect = IOPMFindPowerManagement(kIOMasterPortDefault);
+    io_connect_t connect = IOPMFindPowerManagement(kIOMainPortDefault);
     
     // Set pmset values according to sleep type
     if (sleepType == kSleepTypeHibernate) {
@@ -1574,7 +1586,7 @@ sendSmartBatteryCommand(uint32_t which, uint32_t level)
     
     if (which == kSBSetOverrideCapacity) {
         // Get battery max capacity
-        IOServiceGetMatchingServices(kIOMasterPortDefault, IOServiceMatching("IOPMPowerSource"), &iterator);
+        IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOPMPowerSource"), &iterator);
         if (iterator) {
             io_registry_entry_t entry = IO_OBJECT_NULL;
             while ((entry = IOIteratorNext(iterator)))
@@ -1767,3 +1779,4 @@ static void sendBHUpdateTimeDelta(long timeDelta) {}
 static void sendBHDataFromCFPrefs(void){}
 static void sendAgingDataFromCFPrefs(void){}
 static void isVactSupported(){}
+

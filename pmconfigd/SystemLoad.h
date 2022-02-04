@@ -179,6 +179,10 @@ __private_extern__ void registerUserActivityClient(xpc_object_t peer, xpc_object
 __private_extern__ void updateUserActivityTimeout(xpc_object_t connection, xpc_object_t msg);
 __private_extern__ void deRegisterUserActivityClient(xpc_object_t peer);
 
+bool getUserActiveAssertionValid(void);
+
+uint64_t getUserActivePostedLevels(void);
+
 #ifdef XCTEST
 void xctSetUserActiveRootDomain(bool active);
 bool xctGetUserActiveRootDomain(void);

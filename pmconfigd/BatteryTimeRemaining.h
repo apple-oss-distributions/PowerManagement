@@ -38,6 +38,10 @@
 #define kMinTimeDeltaForBattRead           (24*60*60)  // 24hrs
 
 #if TARGET_OS_IPHONE || POWERD_IOS_XCTEST || TARGET_OS_OSX
+
+// kTrueNCCCycleCountThreshold - If previously calculated NCCP is not available, NCCP is set to h/w specified value only if
+// battery cycle count is above kTrueNCCCycleCountThreshold. Otherwise, NCCP is set to kInitialNominalCapacityPercentage
+#define kTrueNCCCycleCountThreshold         20  // CycleCount above which NCCP is set to true value(in case past data is not available)
 #define kBatteryHealthUsesUPO        0x594553 // YES
 #define kBatteryHealthWithoutUPO     0x4e4f   // NO
 
@@ -47,12 +51,9 @@
 #define kBHSvcFlagsVersion3     3
 #define kBatteryHealthCurrentVersion        kBHSvcFlagsVersion3
 
-#endif
-#if TARGET_OS_IPHONE || POWERD_IOS_XCTEST
+#endif // TARGET_OS_IPHONE || POWERD_IOS_XCTEST || TARGET_OS_OSX
 
-// kTrueNCCCycleCountThreshold - If previously calculated NCCP is not available, NCCP is set to h/w specified value only if
-// battery cycle count is above kTrueNCCCycleCountThreshold. Otherwise, NCCP is set to kInitialNominalCapacityPercentage
-#define kTrueNCCCycleCountThreshold         20  // CycleCount above which NCCP is set to true value(in case past data is not available)
+#if TARGET_OS_IPHONE || POWERD_IOS_XCTEST
 
 // kNCCMinCycleCountChange - Change in battery cycle count required before triggering change in NCCP.
 #define kNCCMinCycleCountChange             5
@@ -69,6 +70,47 @@
 #define kSmcKeyBatteryFeatureSet                'BFS0'
 
 #endif // TARGET_OS_IPHONE || POWERD_IOS_XCTEST
+
+#if TARGET_OS_OSX || BHUI_XCTEST
+
+enum vactMode {
+    vactModeDisabled = 0,
+    vactModeEnabled,
+    vactModesCount,
+};
+
+struct capacitySample {
+    // inputs
+    int fcc;    // Scaled FCC as returned by SMC
+
+    // persistent variable
+    int fccDaySampleAvg;
+    // persistent output
+    int ncc;
+    int nccpMonotonic;
+};
+
+struct nominalCapacityParams {
+    // inputs
+    int current;        // BISS or B0AC
+    int temperature;    // TB0T
+    int designCapacity;
+    int fcc;            // FCC as returned by the gauge
+    // substruct
+    struct capacitySample sample[vactModesCount];
+    // persistent variables
+    unsigned int fccDaySampleCount;
+    unsigned int fccAvgHistoryCount;
+    // parameters
+    int gamma;
+    // output
+    unsigned int significantChange;
+    unsigned int error;
+    unsigned int debug;
+    int cycleCount;
+    uint64_t ts;
+};
+#endif
 
 __private_extern__ IOPMBattery **_batteries(void);
 __private_extern__ int _batteryCount(void);
@@ -92,6 +134,7 @@ __private_extern__ void sendAdapterDetails(xpc_object_t remoteConnection, xpc_ob
 
 #if TARGET_OS_OSX
 __private_extern__ void getBatteryHealthPersistentData(xpc_object_t remoteConnection, xpc_object_t msg);
+__private_extern__ void setPermFaultStatus(xpc_object_t remoteConnection, xpc_object_t msg);
 #endif
 
 /* getActivePSType
@@ -103,6 +146,10 @@ __private_extern__ PowerSources _getPowerSource(void);
 __private_extern__ CFDictionaryRef CF_RETURNS_RETAINED getActiveUPSDictionary(void);
 __private_extern__ void batteryTimeRemaining_setCustomBatteryProps(CFDictionaryRef batteryProps);
 __private_extern__ void batteryTimeRemaining_resetCustomBatteryProps(void);
+
+#define kBHCalibrationFlagsKey      "calibrationFlags"
+#define kBHCalibration0Key          "calibration0"
+#define kBHCalibration1Key          "calibration1"
 
 // needed to untanble some cross calls, please don't expand usage of it
 __private_extern__ dispatch_queue_t BatteryTimeRemaining_getQ(void);
@@ -155,6 +202,7 @@ __private_extern__ CFDictionaryRef batteryTimeRemaining_copyIOPMPowerSourceDicti
 // Get current UI SOC (battery percent)
 __private_extern__ int batteryTimeRemaining_getPercentRemaining(void);
 __private_extern__ CFStringRef batteryTimeRemaining_getBatterySerialNumber(void);
+__private_extern__ bool batteryTimeRemaining_isOBCEngaged(void);
 
 #if TARGET_OS_IOS || TARGET_OS_WATCH || TARGET_OS_OSX
 void setBHUpdateTimeDelta(xpc_object_t remoteConnection, xpc_object_t msg);

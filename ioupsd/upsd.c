@@ -24,7 +24,6 @@
 // Includes
 //---------------------------------------------------------------------------
 
-#include <syslog.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
@@ -33,7 +32,7 @@
 #include <servers/bootstrap.h>
 #include <sysexits.h>
 #include <notify.h>
-
+#include <os/log.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/IOKitServer.h>
 #include <IOKit/IOCFURLAccess.h>
@@ -50,6 +49,7 @@
 #include <IOKit/pwr_mgt/IOPMLibPrivate.h>
 
 #include <SystemConfiguration/SystemConfiguration.h>
+#include <SystemConfiguration/SCValidation.h>
 #if UPS_DEBUG
 #include <SystemConfiguration/SCPrivate.h>
 #endif
@@ -59,14 +59,20 @@
 #include "IOUPSPrivate.h"
 #include <AssertMacros.h>
 
+
 #define kDefaultUPSName		"Generic UPS"
 #define kDefaultTransport   "UNK"
+
+#define INFO_LOG(fmt, args...)    os_log(ioupsdLog, fmt, ##args);
+#define DEBUG_LOG(fmt, args...)   os_log_debug(ioupsdLog, fmt, ##args);
+#define ERROR_LOG(fmt, args...)   os_log_error(ioupsdLog, fmt, ##args);
 
 //---------------------------------------------------------------------------
 // Globals
 //---------------------------------------------------------------------------
 static CFRunLoopSourceRef       gClientRequestRunLoopSource = NULL;
 static CFRunLoopRef             gMainRunLoop = NULL;
+static os_log_t                 ioupsdLog;
 static CFMutableArrayRef        gUPSDataArrayRef = NULL;
 static unsigned int             gUPSCount = 0;
 static IONotificationPortRef	gNotifyPort = NULL;
@@ -123,10 +129,15 @@ static void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event);
 static void BatteryCaseHandleAdapterFamilyChange(UPSDataRef upsDataRef, CFTypeRef adapterFamily);
 static void BatteryCaseHandleACStateChange(UPSDataRef upsDataRef, CFTypeRef powerState);
 static UPSDataRef GetPrivateData( CFDictionaryRef properties );
+static IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
+                              CFMutableDictionaryRef upsStoreDict,
+                              CFDictionaryRef properties,
+                              CFSetRef capabilities);
 static IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
                                            CFDictionaryRef properties,
                                            CFSetRef capabilities);
 static Boolean SetupMIGServer(void);
+static io_service_t GetIOPMPS(void);
 
 //---------------------------------------------------------------------------
 // Battery case helper functions
@@ -146,13 +157,12 @@ void BatteryCasePollAverageChargeCurrentCallback(CFRunLoopTimerRef timer __unuse
 //
 //---------------------------------------------------------------------------
 int main (int argc, const char *argv[]) {
-    openlog("upsd", LOG_PID|LOG_NDELAY, LOG_USER);
     signal(SIGINT, SignalHandler);
     SetupMIGServer();
     
     // Create a notification port and add its run loop event source to our run
     // loop. This is how async notifications get set up.
-    gNotifyPort = IONotificationPortCreate(kIOMasterPortDefault);
+    gNotifyPort = IONotificationPortCreate(kIOMainPortDefault);
     CFRunLoopAddSource(CFRunLoopGetCurrent(),
                        IONotificationPortGetRunLoopSource(gNotifyPort),
                        kCFRunLoopDefaultMode);
@@ -186,7 +196,7 @@ void CleanupAndExit(void) {
 // SignalHandler
 //---------------------------------------------------------------------------
 void SignalHandler(int sigraised) {
-    syslog(LOG_INFO, "upsd: exiting SIGINT\n");
+    INFO_LOG("upsd: exiting SIGINT\n");
     CleanupAndExit();
 }
 
@@ -218,7 +228,7 @@ Boolean SetupMIGServer() {
     kern_result = bootstrap_check_in(bootstrap_port, kIOUPSPlugInServerName,
                                      &ups_port);
     if (BOOTSTRAP_SUCCESS != kern_result) {
-        syslog(LOG_ERR, "ioupsd: bootstrap_check_in \"%s\" error = %d\n",
+        ERROR_LOG("ioupsd: bootstrap_check_in \"%s\" error = %d\n",
                kIOUPSPlugInServerName, kern_result);
     } else {
         upsdMachPort = CFMachPortCreateWithPort(kCFAllocatorDefault, ups_port,
@@ -473,31 +483,34 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
         if ( ( result == S_OK ) && upsPlugInInterface )
         {
             kr = (*upsPlugInInterface)->createAsyncEventSource(upsPlugInInterface, &typeRef);
-            
+
             if ((kr != kIOReturnSuccess) || !typeRef)
                 goto UPSDEVICEADDED_FAIL;
-            
-            if ( CFGetTypeID(typeRef) == CFArrayGetTypeID() )
-            {
+
+            if (CFGetTypeID(typeRef) == CFArrayGetTypeID()) {
                 CFArrayRef  arrayRef = (CFArrayRef)typeRef;
                 CFIndex     index, count;
-                
-                for (index=0, count=CFArrayGetCount(typeRef); index<count; index++)
+
+                for (index=0, count=CFArrayGetCount(typeRef); index<count; index++) {
                     ProcessUPSEventSource(CFArrayGetValueAtIndex(arrayRef, index), &upsEventTimer, &upsEventSource);
-            }
-            else
-            {
+                }
+            } else {
                 ProcessUPSEventSource(typeRef, &upsEventTimer, &upsEventSource);
             }
-            
-            if ( upsEventSource )
+
+            if (upsEventSource) {
+                CFRetain(upsEventSource);
                 CFRunLoopAddSource(CFRunLoopGetCurrent(), upsEventSource, kCFRunLoopDefaultMode);
-            
-            if ( upsEventTimer )
+            }
+
+            if (upsEventTimer) {
+                CFRetain(upsEventTimer);
                 CFRunLoopAddTimer(CFRunLoopGetCurrent(), upsEventTimer, kCFRunLoopDefaultMode);
-            
-            if ( typeRef )
+            }
+
+            if (typeRef) {
                 CFRelease(typeRef);
+            }
         }
         // Couldn't grab the new interface.  Fallback on the old.
         else
@@ -542,17 +555,17 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
                 goto UPSDEVICEADDED_FAIL;
             
             if (upsDataRef->deviceType == kDeviceTypeBatteryCase) {
-                // Initialize AC state manually according to the default value.
-                // If a UPS is not on battery power, this will get fixed in the
-                // first ProcessUPSEvent call below
-                upsDataRef->hasACPower = false;
-                BatteryCaseHandleACStateChange(upsDataRef, CFSTR(kIOPSBatteryPowerValue));
-                
+                if (!needsMerge) {
+                    // Initialize AC state manually according to the default value.
+                    // If a UPS is not on battery power, this will get fixed in the
+                    // first ProcessUPSEvent call below
+                    upsDataRef->hasACPower = false;
+                    BatteryCaseHandleACStateChange(upsDataRef, CFSTR(kIOPSBatteryPowerValue));
+                }
+
                 // Register for interest in battery state changes to update
                 // battery cases on our state of charge
-                io_service_t chargerService = IOServiceGetMatchingService(kIOMasterPortDefault,
-                                                                          IOServiceMatching("IOPMPowerSource"));
-                
+                io_service_t chargerService = GetIOPMPS();
                 if (chargerService != MACH_PORT_NULL) {
                     IOServiceAddInterestNotification(gNotifyPort,
                                                           chargerService,
@@ -565,7 +578,7 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
                 // Set the battery case's address
                 kr = BatteryCaseSetAddress(upsDataRef);
                 if (kr != kIOReturnSuccess) {
-                    syslog(LOG_ERR, "failed to send address to power source %d (ret=0x%X)\n",
+                    ERROR_LOG("failed to send address to power source %d (ret=0x%X)\n",
                            upsDataRef->upsID, kr);
                 }
             }
@@ -606,17 +619,19 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
             (*upsPlugInInterface)->Release(upsPlugInInterface);
             upsPlugInInterface = NULL;
         }
-        
+
         if (upsEventSource) {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), upsEventSource,
                                   kCFRunLoopDefaultMode);
+            CFRelease(upsEventSource);
             upsEventSource = NULL;
         }
-        
+
         if (upsEventTimer) {
             CFRunLoopRemoveTimer(CFRunLoopGetCurrent(), upsEventTimer,
                                  kCFRunLoopDefaultMode);
-            upsEventSource = NULL;
+            CFRelease(upsEventTimer);
+            upsEventTimer = NULL;
         }
         
     UPSDEVICEADDED_CLEANUP:
@@ -710,7 +725,7 @@ void RemoveAndReleasePowerManagerUPSEntry(UPSDataRef upsDataRef) {
         IOReturn result = IOPSReleasePowerSource(upsDataRef->powerSourceID);
         gUPSCount--;
         if (result != kIOReturnSuccess) {
-            syslog(LOG_ERR, "IOPSReleasePowerSource failed (IOReturn: %d)\n", result);
+            ERROR_LOG("IOPSReleasePowerSource failed (IOReturn: %d)\n", result);
         }
         upsDataRef->powerSourceID = NULL;
     }
@@ -748,17 +763,32 @@ kern_return_t BatteryCaseSetDeviceCurrentLimit(CFTypeRef currentLimitRef) {
 void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event)
 {
     long count, index;
-    
+
     if (!upsDataRef || !event)
         return;
-    
-    if ((count = CFDictionaryGetCount(event))) {
+
+    CFMutableDictionaryRef mutableEvent = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, event);
+    if (!mutableEvent) {
+        return;
+    }
+
+    if (upsDataRef->deviceType == kDeviceTypeBatteryCase &&
+        upsDataRef->requiresCurrentLimitControl &&
+        !upsDataRef->hasACPower) {
+        // inject kIOPSAppleBatteryCaseAvailableCurrentKey if not already in dict
+        if (!CFDictionaryGetValue(mutableEvent, CFSTR(kIOPSAppleBatteryCaseAvailableCurrentKey))) {
+            CFDictionarySetValue(mutableEvent, CFSTR(kIOPSAppleBatteryCaseAvailableCurrentKey),
+                                 CFDictionaryGetValue(upsDataRef->upsStoreDict, CFSTR(kIOPSAppleBatteryCaseAvailableCurrentKey)));
+        }
+    }
+
+    if ((count = CFDictionaryGetCount(mutableEvent))) {
         CFTypeRef *keys     = (CFTypeRef *) malloc(sizeof(CFTypeRef) * count);
         CFTypeRef *values   = (CFTypeRef *) malloc(sizeof(CFTypeRef) * count);
-        
-        CFDictionaryGetKeysAndValues(event, (const void **)keys,
+
+        CFDictionaryGetKeysAndValues(mutableEvent, (const void **)keys,
                                      (const void **)values);
-        
+
         for (index = 0; index < count; index++) {
             // If a battery case changes from "unplugged" to "plugged in",
             // or vice versa, we need to configure it.
@@ -781,20 +811,22 @@ void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event)
                        !upsDataRef->hasACPower) {
                 BatteryCaseSetDeviceCurrentLimit(values[index]);
             }
-            
+
             CFDictionarySetValue(upsDataRef->upsStoreDict, keys[index],
                                  values[index]);
         }
-        
+
         free (keys);
         free (values);
-        
+
         IOReturn result = IOPSSetPowerSourceDetails(upsDataRef->powerSourceID,
                                                     upsDataRef->upsStoreDict);
         if (result != kIOReturnSuccess) {
-            syslog(LOG_ERR, "updating power source details failed\n");
+            ERROR_LOG("updating power source details failed\n");
         }
     }
+
+    CFRelease(mutableEvent);
 }
 
 
@@ -942,7 +974,6 @@ UPSDataRef GetPrivateData(CFDictionaryRef properties) {
     return upsDataRef;
 }
 
-
 //---------------------------------------------------------------------------
 // CreatePowerManagerUPSEntry
 //
@@ -954,81 +985,143 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
                                     CFSetRef capabilities)
 {
     CFMutableDictionaryRef upsStoreDict = NULL;
+    IOReturn result = kIOReturnSuccess;
+    char upsLabelString[kInternalUPSLabelLength];
+
+    if (!upsDataRef || !properties || !capabilities) {
+        return kIOReturnError;
+    }
+
+    upsStoreDict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+                                             &kCFTypeDictionaryKeyCallBacks,
+                                             &kCFTypeDictionaryValueCallBacks);
+
+    // Set some Store values
+    if (upsStoreDict) {
+        result = PopulateUpsStoreDict(upsDataRef, upsStoreDict, properties, capabilities);
+    }
+
+    // Uniquely name each Sys Config key
+    //
+    snprintf(upsLabelString, kInternalUPSLabelLength, "/UPS%d",
+             upsDataRef->upsID);
+
+    result = IOPSCreatePowerSource(&(upsDataRef->powerSourceID));
+    gUPSCount++;
+
+    // TODO: possible trouble spot.
+    //       Shouldn't need to check/release since it only exists if we succeed.
+    if (result != kIOReturnSuccess) {
+        upsDataRef->powerSourceID = NULL;
+        return result;
+    }
+
+    result = IOPSSetPowerSourceDetails(upsDataRef->powerSourceID, upsStoreDict);
+
+    if (result == kIOReturnSuccess) {
+        // Store our SystemConfiguration variables in our private data
+        upsDataRef->upsStoreDict = upsStoreDict;
+    } else if (upsStoreDict) {
+        CFRelease(upsStoreDict);
+    }
+
+    return result;
+}
+
+IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
+                              CFMutableDictionaryRef upsStoreDict,
+                              CFDictionaryRef properties,
+                              CFSetRef capabilities)
+{
     CFStringRef upsName = NULL;
     CFStringRef transport = NULL;
     CFNumberRef vid = NULL;
     CFNumberRef pid = NULL;
     CFNumberRef number = NULL;
     CFNumberRef modelNum = NULL;
-    IOReturn result = kIOReturnSuccess;
+    CFBooleanRef chargingUI = NULL;
     int elementValue = 0;
     uint32_t psID = 0;
-    char upsLabelString[kInternalUPSLabelLength];
-    
-    if (!upsDataRef || !properties || !capabilities)
+
+    if (!upsStoreDict || !properties || !capabilities) {
         return kIOReturnError;
-    
-    upsStoreDict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
-                                             &kCFTypeDictionaryKeyCallBacks,
-                                             &kCFTypeDictionaryValueCallBacks);
-    
-    // Set some Store values
-    if (upsStoreDict) {
-        // We need to save a name for this device.  First, try to see if we have
-        // a USB Product Name.  If that fails then use the manufacturer and if
-        // that fails, then use a generic name.  Couldn't we use a serial # here?
-        //
-        upsName = (CFStringRef) CFDictionaryGetValue(properties,
-                                                     CFSTR(kIOPSNameKey));
-        if (!upsName)
-            upsName = CFSTR(kDefaultUPSName);
-        
-        transport = (CFStringRef) CFDictionaryGetValue(properties,
-                                                       CFSTR(kIOPSTransportTypeKey));
-        if (!transport)
-            transport = CFSTR(kDefaultTransport);
-        
-        vid = (CFNumberRef) CFDictionaryGetValue(properties,
-                                                 CFSTR(kIOPSVendorIDKey));
-        
-        
-        pid = (CFNumberRef) CFDictionaryGetValue(properties,
-                                                 CFSTR(kIOPSProductIDKey));
-        
-        modelNum = (CFNumberRef) CFDictionaryGetValue(properties,
-                                                      CFSTR(kIOPSModelNumber));
+    }
+
+    // We need to save a name for this device.  First, try to see if we have
+    // a USB Product Name.  If that fails then use the manufacturer and if
+    // that fails, then use a generic name.  Couldn't we use a serial # here?
+    //
+    upsName = (CFStringRef) CFDictionaryGetValue(properties,
+                                                 CFSTR(kIOPSNameKey));
+    if (!upsName && !CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSNameKey))) {
+        upsName = CFSTR(kDefaultUPSName);
+    }
+    if (upsName) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSNameKey), upsName);
+    }
+
+    transport = (CFStringRef) CFDictionaryGetValue(properties,
+                                                   CFSTR(kIOPSTransportTypeKey));
+    if (transport) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), transport);
-        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsPresentKey), kCFBooleanTrue);
-        if (upsDataRef->deviceType == kDeviceTypeUPS) {
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanTrue);
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSACPowerValue));
-        }
-        else {
+    } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSTransportTypeKey))) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), CFSTR(kDefaultTransport));
+    }
+
+    vid = (CFNumberRef) CFDictionaryGetValue(properties,
+                                             CFSTR(kIOPSVendorIDKey));
+    pid = (CFNumberRef) CFDictionaryGetValue(properties,
+                                             CFSTR(kIOPSProductIDKey));
+    modelNum = (CFNumberRef) CFDictionaryGetValue(properties,
+                                                  CFSTR(kIOPSModelNumber));
+
+    CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsPresentKey), kCFBooleanTrue);
+    if (upsDataRef->deviceType == kDeviceTypeUPS) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanTrue);
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSACPowerValue));
+    } else {
+        CFBooleanRef boolean = (CFBooleanRef) CFDictionaryGetValue(properties,
+                                                                 CFSTR(kIOPSIsChargingKey));
+        if (boolean) {
+            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), boolean);
+        } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSIsChargingKey))) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
+        }
+
+        CFStringRef string = (CFStringRef) CFDictionaryGetValue(properties,
+                                                                CFSTR(kIOPSPowerSourceStateKey));
+        if (string) {
+            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), string);
+        } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey))) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSBatteryPowerValue));
         }
+    }
 
-        if (vid) {
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSVendorIDKey), vid);
-        }
-        if (pid) {
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSProductIDKey), pid);
-        }
-        if (modelNum) {
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSModelNumber), modelNum);
-        }
+    if (vid) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSVendorIDKey), vid);
+    }
+    if (pid) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSProductIDKey), pid);
+    }
+    if (modelNum) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSModelNumber), modelNum);
+    }
 
-        psID = MAKE_UNIQ_SOURCE_ID(getpid(), upsDataRef->upsID);
-        number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                                &psID);
-        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceIDKey), number);
-        CFRelease(number);
-        
-        // rdar://problem/21817316 Initialize battery cases to a max capacity
-        // of 0 so they don't show up in UI until we've received the correct
-        // value from the device.
+    psID = MAKE_UNIQ_SOURCE_ID(getpid(), upsDataRef->upsID);
+    number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
+                            &psID);
+    CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceIDKey), number);
+    CFRelease(number);
+
+    number = (CFNumberRef) CFDictionaryGetValue(properties,
+                                                CFSTR(kIOPSMaxCapacityKey));
+    if (number) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSMaxCapacityKey), number);
+    } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSMaxCapacityKey))) {
         if (upsDataRef->deviceType == kDeviceTypeBatteryCase || upsDataRef->deviceType == kDeviceTypeGameController) {
+            // rdar://problem/21817316 Initialize battery cases to a max capacity
+            // of 0 so they don't show up in UI until we've received the correct
+            // value from the device.
             elementValue = 0;
         } else {
             elementValue = 100;
@@ -1037,18 +1130,30 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
                                 &elementValue);
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSMaxCapacityKey), number);
         CFRelease(number);
-        
-        if (CFSetContainsValue(capabilities, CFSTR(kIOPSCurrentCapacityKey))) {
-            //  Initialize kIOPSCurrentCapacityKey
-            //
-            //  For Power Manager, we will be sharing capacity with Power Book
-            //  battery capacities, so we want a consistent measure. For now we
-            // have settled on percentage of full capacity.
-            //
-            // rdar://problem/51062434 the HID layer will not report a key
-            // changing until it receives a value different from what it
-            // was initialized to. Since CurrentCapacity initializes to 0
-            // we have to inititialze to 0 as well.
+    }
+
+    chargingUI = CFDictionaryGetValue(properties, CFSTR(kIOPSShowChargingUIKey));
+    if (chargingUI) {
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSShowChargingUIKey), chargingUI);
+    }
+
+    if (CFSetContainsValue(capabilities, CFSTR(kIOPSCurrentCapacityKey))) {
+        //  Initialize kIOPSCurrentCapacityKey
+        //
+        //  For Power Manager, we will be sharing capacity with Power Book
+        //  battery capacities, so we want a consistent measure. For now we
+        // have settled on percentage of full capacity.
+        //
+        // rdar://problem/51062434 the HID layer will not report a key
+        // changing until it receives a value different from what it
+        // was initialized to. Since CurrentCapacity initializes to 0
+        // we have to inititialze to 0 as well.
+
+        if (CFDictionaryContainsKey(properties, CFSTR(kIOPSCurrentCapacityKey))) {
+            number = (CFNumberRef) CFDictionaryGetValue(properties,
+                                                        CFSTR(kIOPSCurrentCapacityKey));
+            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSCurrentCapacityKey), number);
+        } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSCurrentCapacityKey))) {
             elementValue = 0;
             number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
                                     &elementValue);
@@ -1056,87 +1161,74 @@ IOReturn CreatePowerManagerUPSEntry(UPSDataRef upsDataRef,
                                  number);
             CFRelease(number);
         }
-        
-        if (CFSetContainsValue(capabilities, CFSTR(kIOPSTimeToEmptyKey))) {
-            // Initialize kIOPSTimeToEmptyKey
-            // (OS 9 PowerClass.c assumed 100 milliwatt-hours)
-            //
-            elementValue = 100;
-            number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                                    &elementValue);
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTimeToEmptyKey),
-                                 number);
-            CFRelease(number);
-        }
-        
-        if (CFSetContainsValue(capabilities, CFSTR(kIOPSVoltageKey))) {
-            // Initialize kIOPSVoltageKey (OS 9 PowerClass.c assumed millivolts.
-            // (Shouldn't that be 130,000 millivolts for AC?))
-            // Actually, Power Devices Usage Tables say units will be in Volts.
-            // However we have to check what exponent is used because that may
-            // make the value we get in centiVolts (exp = -2). So it looks like
-            // OS 9 sources said millivolts, but used centivolts. Our final
-            // answer should device by proper exponent to get back to Volts.
-            //
-            elementValue = 13 * 1000 / 100;
-            number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                                    &elementValue);
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSVoltageKey), number);
-            CFRelease(number);
-        }
-        
-        if (CFSetContainsValue(capabilities, CFSTR(kIOPSCurrentKey))) {
-            // Initialize kIOPSCurrentKey (What would be a good amperage to
-            // initialize to?) Same discussion as for Volts, where the unit
-            // for current is Amps. But with typical exponents (-2), we get
-            // centiAmps. Hmm... typical current for USB may be 500 milliAmps,
-            // which would be .5 A. Since that is not an integer, that may be
-            // why our displays get larger numbers
-            //
-            elementValue = 1;	// Just a guess!
-            number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                                    &elementValue);
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSCurrentKey), number);
-            CFRelease(number);
-        }
-        
-        if (upsDataRef->deviceType == kDeviceTypeAccessoryBattery || upsDataRef->deviceType == kDeviceTypeGameController) {
-            // This is an accessory battery
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTypeKey), CFSTR(kIOPSAccessoryType));
-        }
-        else
-            CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTypeKey), CFSTR(kIOPSUPSType));
+    }
 
-    }
-    
-    // Uniquely name each Sys Config key
-    //
-    snprintf(upsLabelString, kInternalUPSLabelLength, "/UPS%d",
-             upsDataRef->upsID);
-    
-    result = IOPSCreatePowerSource(&(upsDataRef->powerSourceID));
-    gUPSCount++;
-    
-    // TODO: possible trouble spot.
-    //       Shouldn't need to check/release since it only exists if we succeed.
-    if (result != kIOReturnSuccess) {
-        upsDataRef->powerSourceID = NULL;
-        return result;
-    }
-    
-    result = IOPSSetPowerSourceDetails(upsDataRef->powerSourceID, upsStoreDict);
-    
-    if (result == kIOReturnSuccess) {
-        // Store our SystemConfiguration variables in our private data
+    if (CFSetContainsValue(capabilities, CFSTR(kIOPSTimeToEmptyKey))) {
+        // Initialize kIOPSTimeToEmptyKey
+        // (OS 9 PowerClass.c assumed 100 milliwatt-hours)
         //
-        upsDataRef->upsStoreDict = upsStoreDict;
-        
-    } else if (upsStoreDict) {
-        CFRelease(upsStoreDict);
+        elementValue = 100;
+        number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
+                                &elementValue);
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTimeToEmptyKey),
+                             number);
+        CFRelease(number);
     }
-    
-    return result;
+
+    if (CFSetContainsValue(capabilities, CFSTR(kIOPSVoltageKey))) {
+        // Initialize kIOPSVoltageKey (OS 9 PowerClass.c assumed millivolts.
+        // (Shouldn't that be 130,000 millivolts for AC?))
+        // Actually, Power Devices Usage Tables say units will be in Volts.
+        // However we have to check what exponent is used because that may
+        // make the value we get in centiVolts (exp = -2). So it looks like
+        // OS 9 sources said millivolts, but used centivolts. Our final
+        // answer should device by proper exponent to get back to Volts.
+        //
+        elementValue = 13 * 1000 / 100;
+        number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
+                                &elementValue);
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSVoltageKey), number);
+        CFRelease(number);
+    }
+
+    if (CFSetContainsValue(capabilities, CFSTR(kIOPSCurrentKey))) {
+        // Initialize kIOPSCurrentKey (What would be a good amperage to
+        // initialize to?) Same discussion as for Volts, where the unit
+        // for current is Amps. But with typical exponents (-2), we get
+        // centiAmps. Hmm... typical current for USB may be 500 milliAmps,
+        // which would be .5 A. Since that is not an integer, that may be
+        // why our displays get larger numbers
+        //
+        elementValue = 1;    // Just a guess!
+        number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
+                                &elementValue);
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSCurrentKey), number);
+        CFRelease(number);
+    }
+
+    if (upsDataRef->deviceType == kDeviceTypeAccessoryBattery || upsDataRef->deviceType == kDeviceTypeGameController) {
+        // This is an accessory battery
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTypeKey), CFSTR(kIOPSAccessoryType));
+    }
+    else
+        CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTypeKey), CFSTR(kIOPSUPSType));
+
+    return kIOReturnSuccess;
 }
+
+static io_service_t GetIOPMPS(void)
+{
+    static io_service_t iopmps;
+    if (!iopmps) {
+        iopmps = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMPowerSource"));
+        if (!iopmps) {
+            ERROR_LOG("failed to find IOPMPowerSource\n");
+        }
+    }
+
+    return iopmps;
+}
+
 
 
 //===========================================================================
