@@ -41,6 +41,7 @@
 #include <sys/syscall.h>
 #include <Kernel/kern/debug.h>
 #include <mach/mach_time.h>
+#include <thermal/smcSensorExchange.h>
 #include <libspindump_priv.h>
 #include <CoreFoundation/CFXPCBridge.h>
 #if __has_include (<CoreAnalytics/CoreAnalytics.h>)
@@ -116,6 +117,11 @@ typedef enum {
 enum {
     kSilentRunningOff = 0,
     kSilentRunningOn  = 1
+};
+
+enum {
+    kPerfUnrestricted = 0,
+    kPerfRestricted = 1
 };
 
 /* Auto Poweroff info */
@@ -353,6 +359,9 @@ uint32_t                        gCurrentSilentRunningState = kSilentRunningOff;
 
 bool                            gMachineStateRevertible = true;
 
+uint32_t                        gCurrentPerfState = kPerfUnrestricted;
+union SMCSensorEx_Jumbo         perfStateSMCSensorExData;
+
 /************************************************************************************/
 /************************************************************************************/
 /************************************************************************************/
@@ -400,6 +409,12 @@ void PMConnection_prime(void)
     
     sleepwake_log = os_log_create(PM_LOG_SYSTEM, SLEEPWAKE_LOG);
     bzero(&gSleepService, sizeof(gSleepService));
+    
+    // Initialize the SMCSensorEx_Jumbo headers
+    perfStateSMCSensorExData.SENSORS.header.uchVersion = SMC_SENSOR_EXCHANGE_POWERD_VER1_VERSION;
+    perfStateSMCSensorExData.SENSORS.header.uchNumSensors = SMC_SENSOR_EXCHANGE_POWERD_VER1_NUMSENSORS;
+    perfStateSMCSensorExData.SENSORS.header.uchRollingSequenceNumber = 0;
+    perfStateSMCSensorExData.SENSORS.header.uchRsvd = 0;
 
     gConnections = CFArrayCreateMutable(kCFAllocatorDefault, 100, &_CFArrayConnectionCallBacks);
                                         
@@ -2131,6 +2146,92 @@ void logAwakeTime(void)
 #endif
 }
 
+void logCASleepNotificationLastResponder(CFArrayRef sleepDelayStats)
+{
+#if HAS_COREANALYTICS
+
+    long                    numElems = 0;
+    long                    i = 0;
+    CFDictionaryRef         appDelayInfoRef = NULL;
+    CFStringRef             transString = NULL;
+    CFStringRef             responseTypeString = NULL;
+    CFNumberRef             delayRef = NULL;
+    int                     delay;
+    int                     delayTimeoutMS = 30000;
+    
+    long                    lastResponderIndex = -1;
+    int                     lastResponderTime = INT_MIN;
+    
+    char                    *appNameBuf = NULL;
+    
+    
+    if (!isA_CFArray(sleepDelayStats)) {
+        return;
+    }
+    
+    numElems = CFArrayGetCount(sleepDelayStats);
+    if (numElems == 0) {
+        return;
+    }
+    
+    for (i=0; i < numElems; i++) {
+        appDelayInfoRef = CFArrayGetValueAtIndex(sleepDelayStats, i);
+        if ( !isA_CFDictionary(appDelayInfoRef)) {
+            continue;;
+        }
+        
+        // Only consider delays for sleep transitions
+        transString  = CFDictionaryGetValue(appDelayInfoRef, CFSTR(kIOPMStatsSystemTransitionKey));
+        if (!isA_CFString(transString) || ( !CFEqual(transString, CFSTR("Sleep")) )) {
+            continue;
+        }
+        
+        // Only interested in kIOPMStatsResponseTimedOut and kIOPMStatsResponseSlow events
+        responseTypeString  = CFDictionaryGetValue(appDelayInfoRef, CFSTR(kIOPMStatsApplicationResponseTypeKey));
+        if (!isA_CFString(responseTypeString) ||
+            ( (!CFEqual(responseTypeString, CFSTR(kIOPMStatsResponseSlow))) &&
+              (!CFEqual(responseTypeString, CFSTR(kIOPMStatsResponseTimedOut))) )  ) {
+            continue;
+        }
+        
+        // For timeout responses, we supply the default value of 30000 ms.
+        if (CFEqual(responseTypeString, CFSTR(kIOPMStatsResponseTimedOut))) {
+            delay = delayTimeoutMS;
+        }
+        
+        else {
+            delayRef = CFDictionaryGetValue(appDelayInfoRef, CFSTR(kIOPMStatsTimeMSKey));
+            if (!isA_CFNumber(delayRef) || (!CFNumberGetValue(delayRef, kCFNumberIntType, &delay))) {
+                continue;
+            }
+        }
+        
+        if (delay > lastResponderTime) {
+            lastResponderTime = delay;
+            lastResponderIndex = i;
+        }
+    }
+    
+    if (lastResponderIndex == -1) {
+        return;
+    }
+    
+    // Grab the last responder's name. Skip for macOS since we might expose 3P app names.
+    
+    
+    analytics_send_event_lazy("com.apple.powerd.sleepdelay", ^xpc_object_t(void) {
+        xpc_object_t dict = xpc_dictionary_create(NULL, NULL, 0);
+        xpc_dictionary_set_uint64(dict, "delay_time", lastResponderTime);
+        if (appNameBuf && strlen(appNameBuf)) {
+            xpc_dictionary_set_string(dict, "last_responder", appNameBuf);
+        }
+        return dict;
+    });
+    
+#endif /* HAS_COREANALYTICS */
+}
+
+
 /*****************************************************************************/
 /* PMConnectionPowerCallBack */
 /*****************************************************************************/
@@ -2526,7 +2627,7 @@ static void PMConnectionPowerCallBack(
             }
             else if (CFEqual(wakeType, kIOPMRootDomainWakeTypeNetwork)) {
                 /* Wake from network activity
-                 * Do not set SilentRunning. Let DAS check thermal levels
+                 * Do not set SilentRunning. Let DAS check thermal
                  * Allow Background tasks only if cur_time >= ts_nextPowerNap
                  */
                 if (_DWBT_allowed()) {
@@ -2614,14 +2715,17 @@ static void PMConnectionPowerCallBack(
             IOAllowPowerChange(gRootDomainConnect, (long)capArgs->notifyRef);     
                    
         SystemLoadSystemPowerStateHasChanged( );
-
         // Get stats on delays while waking up. This includes delays from previous sleep
         // and the current wake
         appStats = (CFArrayRef)_copyRootDomainProperty(CFSTR(kIOPMSleepStatisticsAppsKey));
         if (appStats) {
             logASLMessageAppStats(appStats, kPMASLDomainKernelClientStats);
+#if HAS_COREANALYTICS
+            logCASleepNotificationLastResponder(appStats);
+#endif
             CFRelease(appStats);
         }
+
 
 #if TARGET_OS_OSX
         if (getLastSleepType() == kIOPMSleepTypeHibernate) {
@@ -3726,6 +3830,88 @@ __private_extern__ bool isInSilentRunningMode(void)
 {
     return (gCurrentSilentRunningState == kSilentRunningOn);
 }
+
+IOReturn _smcWritePerfStateSensorExData(bool restrictPerf)
+{
+    IOReturn ret = kIOReturnSuccess;
+    
+    perfStateSMCSensorExData.SENSORS.sensorArray[SMC_SENSOR_EXCHANGE_POWERD_VER1_IDX_SDDS].FLOATS.rValue = (float)restrictPerf;
+    
+    perfStateSMCSensorExData.SENSORS.header.uchRollingSequenceNumber++;
+    return ret;
+}
+
+__private_extern__ bool isInPerfRestrictedMode(void)
+{
+    return (gCurrentPerfState == kPerfRestricted);
+}
+
+__private_extern__ IOReturn setRestrictedPerfMode(bool restrictPerf)
+{
+    IOReturn ret = kIOReturnSuccess;
+    
+    INFO_LOG("Current PerfMode: %s, Target PerfMode: %s\n", gCurrentPerfState ? "Restricted" : "Unrestricted", restrictPerf ? "Restricted" : "Unrestricted");
+    if (isInPerfRestrictedMode() == restrictPerf) {
+        return ret;
+    }
+
+    ret = _smcWritePerfStateSensorExData(restrictPerf);
+    if (ret != kIOReturnSuccess) {
+        ERROR_LOG("Failed to communicate PerfState to SMC, returned 0x%x\n", ret);
+    }
+    
+    gCurrentPerfState = restrictPerf ? kPerfRestricted : kPerfUnrestricted;
+    return ret;
+}
+
+bool shouldExitPerfRestrictedMode(void)
+{
+    if (checkForUnrestrictedPerfType()) {
+        DEBUG_LOG("Exiting PerfRestricted mode due to new PerfUnrestricted assertion.\n");
+        return true;
+    }
+
+    uint64_t userActivityLevel = getUserActivePostedLevels();
+    if (userActivityLevel & kIOPMUserPresentActive) {
+        DEBUG_LOG("Exiting PerfRestricted mode as UserActivityLevel shows UserPresentActive.\n");
+        return true;
+    }
+    else if (userActivityLevel & kIOPMUserPresentPassive) {
+        DEBUG_LOG("Exiting PerfRestricted mode as UserActivityLevel shows UserPresentPassive.\n");
+        return true;
+    }
+    return false;
+}
+
+bool shouldEnterPerfRestrictedMode(void)
+{
+    uint64_t userActivityLevel = getUserActivePostedLevels();
+    if (!checkForUnrestrictedPerfType() && !(userActivityLevel & kIOPMUserPresentActive) && !(userActivityLevel & kIOPMUserPresentPassive))
+    {
+        DEBUG_LOG("Entering PerfRestriced mode as no PerfUnrestricted assertions exist, and UserActivitLevel shows inactive.\n");
+        return true;
+    }
+    return false;
+}
+
+__private_extern__ void evaluatePerfMode(void)
+{
+    dispatch_async(_getPMMainQueue(), ^ {
+        if (isInPerfRestrictedMode()) {
+            bool exitPerfRestrictedMode = shouldExitPerfRestrictedMode();
+            if (exitPerfRestrictedMode) {
+                setRestrictedPerfMode(false);
+            }
+        }
+        else {
+            bool enterPerfRestrictedMode = shouldEnterPerfRestrictedMode();
+            if (enterPerfRestrictedMode) {
+                setRestrictedPerfMode(true);
+            }
+        }
+    });
+}
+
 
 __private_extern__ void _set_sleep_revert(bool state)
 {
