@@ -20,21 +20,22 @@
 *
 * @APPLE_LICENSE_HEADER_END@
 */
-//  PMSmartPowerNapPredictor_Testing.h
-//  PMSmartPowerNapPredictor
 //
-//  Created by Faramola on 10/19/21.
+//  PMCoreSmartPowerNapPredictor_Testing.h
+//  PowerManagement
+//
+//  Created by Prateek Malhotra on 12/7/22.
 //
 
-
+#ifndef PMCoreSmartPowerNapPredictor_Testing_h
+#define PMCoreSmartPowerNapPredictor_Testing_h
 
 #import <Foundation/Foundation.h>
-#import "PMSmartPowerNapPredictor.h"
+#import "PMCoreSmartPowerNapPredictor.h"
 
-@interface PMSmartPowerNapPredictor(Testing)
+@interface PMCoreSmartPowerNapPredictor(Testing)
 @property BOOL feature_enabled;
-@property BOOL is_aod_enabled;
-@property (readonly) BOOL in_smartpowernap;
+@property (readonly) BOOL in_coresmartpowernap;
 @property (readonly) BOOL session_interrupted;
 @property (readonly) BOOL should_reenter;
 @property BOOL current_useractive;
@@ -54,3 +55,7 @@
 - (void)initializeTrialClient;
 - (void)updateTrialFactors;
 @end
+
+
+
+#endif /* PMCoreSmartPowerNapPredictor_Testing_h */

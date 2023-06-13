@@ -20,37 +20,25 @@
 *
 * @APPLE_LICENSE_HEADER_END@
 */
-//  PMSmartPowerNapPredictor_Testing.h
-//  PMSmartPowerNapPredictor
 //
-//  Created by Faramola on 10/19/21.
+//  PMCoreSmartPowerNapClient.m
+//  powerd-binary-Embedded
 //
-
-
+//  Created by Prateek Malhotra on 12/7/22.
+//
 
 #import <Foundation/Foundation.h>
-#import "PMSmartPowerNapPredictor.h"
+#import <Foundation/NSXPCConnection_Private.h>
+#import "PMCoreSmartPowerNapClient.h"
 
-@interface PMSmartPowerNapPredictor(Testing)
-@property BOOL feature_enabled;
-@property BOOL is_aod_enabled;
-@property (readonly) BOOL in_smartpowernap;
-@property (readonly) BOOL session_interrupted;
-@property (readonly) BOOL should_reenter;
-@property BOOL current_useractive;
-@property BOOL skipEndOfSessionTimer;
-@property int max_interruptions;
-@property double max_interruption_duration;
-@property int interruption_cooloff;
-@property double interruption_session_duration;
-@property NSDate *interruption_session_start;
-@property NSDate *full_session_start_time;
-@property NSDate *cumulative_interruption_session_start;
-@property double cumulative_interruption_session_duration;
-@property NSDate *predicted_end_time;
+@implementation PMCoreSmartPowerNapClient
 
 
-- (void)logNotEngaging;
-- (void)initializeTrialClient;
-- (void)updateTrialFactors;
+- (instancetype)initWithConnection: (NSXPCConnection *)conn {
+    self = [super init];
+    if (self) {
+        _connection = conn;
+    }
+    return self;
+}
 @end

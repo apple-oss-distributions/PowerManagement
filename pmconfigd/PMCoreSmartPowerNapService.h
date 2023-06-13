@@ -20,37 +20,38 @@
 *
 * @APPLE_LICENSE_HEADER_END@
 */
-//  PMSmartPowerNapPredictor_Testing.h
-//  PMSmartPowerNapPredictor
 //
-//  Created by Faramola on 10/19/21.
+//  PMCoreSmartPowerNapService.h
+//  PowerManagement
+//
+//  Created by Prateek Malhotra on 12/7/22.
 //
 
-
+#ifndef PMCoreSmartPowerNapService_h
+#define PMCoreSmartPowerNapService_h
 
 #import <Foundation/Foundation.h>
-#import "PMSmartPowerNapPredictor.h"
+#import <Foundation/NSXPCConnection.h>
+#if !XCTEST
+#import <BacklightServices/BLSBacklightChangeRequest.h>
+#import <BacklightServices/BLSBacklightStateObserving.h>
+#import <BacklightServices/BLSBacklightChangeEvent.h>
 
-@interface PMSmartPowerNapPredictor(Testing)
-@property BOOL feature_enabled;
-@property BOOL is_aod_enabled;
-@property (readonly) BOOL in_smartpowernap;
-@property (readonly) BOOL session_interrupted;
-@property (readonly) BOOL should_reenter;
-@property BOOL current_useractive;
-@property BOOL skipEndOfSessionTimer;
-@property int max_interruptions;
-@property double max_interruption_duration;
-@property int interruption_cooloff;
-@property double interruption_session_duration;
-@property NSDate *interruption_session_start;
-@property NSDate *full_session_start_time;
-@property NSDate *cumulative_interruption_session_start;
-@property double cumulative_interruption_session_duration;
-@property NSDate *predicted_end_time;
+#import <BacklightServices/BLSBacklight.h>
+#endif
+#import "_PMCoreSmartPowerNapProtocol.h"
 
 
-- (void)logNotEngaging;
-- (void)initializeTrialClient;
-- (void)updateTrialFactors;
+#if !XCTEST
+@interface PMCoreSmartPowerNapService : NSXPCListener <NSXPCListenerDelegate, _PMCoreSmartPowerNapProtocol, BLSBacklightStateObserving>
+#else
+@interface PMCoreSmartPowerNapService : NSXPCListener <NSXPCListenerDelegate, _PMCoreSmartPowerNapProtocol>
+#endif
+
++ (instancetype)sharedInstance;
+- (void)updateState:(_PMCoreSmartPowerNapState)state;
+- (void)enterCoreSmartPowerNap;
+- (void)exitCoreSmartPowerNap;
 @end
+
+#endif /* PMCoreSmartPowerNapService_h */

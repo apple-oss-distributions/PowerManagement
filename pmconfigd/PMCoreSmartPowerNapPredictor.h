@@ -20,13 +20,15 @@
 *
 * @APPLE_LICENSE_HEADER_END@
 */
-//  PMSmartPowerNapPredictor.h
-//  PMSmartPowerNapPredictor
 //
-//  Created by Archana on 10/19/21.
+//  PMCoreSmartPowerNapPredictor.h
+//  PowerManagement
+//
+//  Created by Prateek Malhotra on 12/7/22.
 //
 
-
+#ifndef PMCoreSmartPowerNapPredictor_h
+#define PMCoreSmartPowerNapPredictor_h
 
 #import <Foundation/Foundation.h>
 #import <xpc/private.h>
@@ -35,32 +37,27 @@
 #if !XCTEST && !TARGET_OS_BRIDGE
 #import <CoreMotion/CMMotionAlarmManager.h>
 #import <CoreMotion/CMMotionAlarmDelegateProtocol.h>
-@interface PMSmartPowerNapPredictor : NSObject <CMMotionAlarmDelegateProtocol>
+@interface PMCoreSmartPowerNapPredictor : NSObject <CMMotionAlarmDelegateProtocol>
 #else
-@interface PMSmartPowerNapPredictor : NSObject
+@interface PMCoreSmartPowerNapPredictor : NSObject
 #endif
 
 + (instancetype)sharedInstance;
 
 - (instancetype)initWithQueue:(dispatch_queue_t)queue;
-- (void)evaluateSmartPowerNap:(BOOL)useractive;
+- (void)evaluateCoreSmartPowerNap:(BOOL)useractive;
 - (void)queryModelAndEngage;
-- (void)enterSmartPowerNap;
-- (void)exitSmartPowerNapWithReason:(NSString *)reason;
+- (void)enterCoreSmartPowerNap;
+- (void)exitCoreSmartPowerNapWithReason:(NSString *)reason;
 - (void)logEndOfSessionWithReason:(NSString *)reason;
 - (void)handleRemoteDeviceIsNear;
-- (void)updateSmartPowerNapState:(BOOL)active;
+- (void)updateCoreSmartPowerNapState:(BOOL)active;
 - (void)updateLockState:(uint64_t)state;
-- (void)updateBacklightState:(BOOL)state;
-- (void)updatePluginState:(BOOL)state;
 - (void)updateMotionState:(BOOL)state;
-- (void)updateAODEnabledStatus:(BOOL)status;
 
 /*
  Update parameters through pmtool
  */
-- (void)updateReentryCoolOffPeriod:(uint32_t)seconds;
-- (void)updateReentryDelaySeconds:(uint32_t)seconds;
 - (void)updateRequeryDelta:(uint32_t)seconds;
 - (void)updateMotionAlarmThreshold:(uint32_t)seconds;
 - (void)updateMotionAlarmStartThreshold:(uint32_t)seconds;
@@ -69,14 +66,12 @@
  */
 - (void)restoreState;
 - (void)saveState:(BOOL)enabled withEndTime:(NSDate *)endTime;
-- (void)saveInterruptions;
 - (BOOL)readStateFromDefaults;
 - (NSDate *)readEndTimeFromDefaults;
-- (void)updateInterruptionsFromDefaults;
 @end
 
 
-@interface PMSmartPowerNapInterruption : NSObject
+@interface PMCoreSmartPowerNapInterruption : NSObject
 @property (retain) NSDate *start;
 @property (retain) NSDate *end;
 @property BOOL is_transient;
@@ -84,4 +79,7 @@
 -(instancetype)initWithStart:(NSDate *)date;
 @end
 
-void setSPNRequeryDelta(xpc_object_t remoteConnection, xpc_object_t msg);
+void setCSPNRequeryDelta(xpc_object_t remoteConnection, xpc_object_t msg);
+
+
+#endif /* PMCoreSmartPowerNapPredictor_h */
