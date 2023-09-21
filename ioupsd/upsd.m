@@ -24,6 +24,7 @@
 // Includes
 //---------------------------------------------------------------------------
 
+#include <Foundation/Foundation.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <mach/mach_host.h>
@@ -97,7 +98,7 @@ typedef struct UPSData {
     Boolean                 isPresent;
     CFMutableDictionaryRef  upsStoreDict;
     CFRunLoopSourceRef      upsEventSource;
-    CFRunLoopTimerRef       upsEventTimer;
+    NSTimer*                upsEventTimer;
     DeviceType              deviceType;
     Boolean                 requiresCurrentLimitControl;
     Boolean                 requiresChargeCurrentUpdates;
@@ -118,7 +119,7 @@ typedef UPSData *UPSDataRef;
 void CleanupAndExit(void);
 static void SignalHandler(int sigraised);
 static void InitUPSNotifications(int usagePages[], int usages[], int count);
-static void ProcessUPSEventSource(CFTypeRef typeRef, CFRunLoopTimerRef * pTimer, CFRunLoopSourceRef * pSource);
+static void ProcessUPSEventSource(CFTypeRef typeRef, NSTimer **pTimer, CFRunLoopSourceRef * pSource);
 static void UPSDeviceAdded(void *refCon, io_iterator_t iterator);
 static void DeviceNotification(void *refCon, io_service_t service,
                                natural_t messageType, void *messageArgument);
@@ -207,7 +208,7 @@ void SignalHandler(int sigraised) {
 extern void upsd_mach_port_callback(CFMachPortRef port, void *msg, CFIndex size,
                                     void *info);
 
-Boolean SetupMIGServer() {
+static Boolean SetupMIGServer(void) {
     Boolean         result = true;
     kern_return_t   kern_result = KERN_SUCCESS;
     CFMachPortRef   upsdMachPort = NULL;  // must release
@@ -341,11 +342,11 @@ ERROR:
 // Performs cast on EventSource to determine if this is a timer or normal
 // event source.
 //---------------------------------------------------------------------------
-void ProcessUPSEventSource(CFTypeRef typeRef, CFRunLoopTimerRef * pTimer, CFRunLoopSourceRef * pSource)
+void ProcessUPSEventSource(CFTypeRef typeRef, NSTimer **pTimer, CFRunLoopSourceRef * pSource)
 {
     if ( CFGetTypeID(typeRef) == CFRunLoopTimerGetTypeID() )
     {
-        *pTimer = (CFRunLoopTimerRef)typeRef;
+        *pTimer = (__bridge_transfer NSTimer*)typeRef;
     }
     else if ( CFGetTypeID(typeRef) == CFRunLoopSourceGetTypeID() )
     {
@@ -458,7 +459,7 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
     CFDictionaryRef         upsEvent            = NULL;
     CFSetRef                upsCapabilites 		= NULL;
     CFRunLoopSourceRef      upsEventSource      = NULL;
-    CFRunLoopTimerRef       upsEventTimer       = NULL;
+    NSTimer*                upsEventTimer       = NULL;
     CFTypeRef               typeRef             = NULL;
     IOCFPlugInInterface **  plugInInterface 	= NULL;
     IOUPSPlugInInterface_v140 ** upsPlugInInterface = NULL;
@@ -487,14 +488,12 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
                 goto UPSDEVICEADDED_FAIL;
 
             if (CFGetTypeID(typeRef) == CFArrayGetTypeID()) {
-                CFArrayRef  arrayRef = (CFArrayRef)typeRef;
+                NSArray*    arrayRef = (__bridge_transfer NSArray*)typeRef;
                 CFIndex     index, count;
 
-                for (index=0, count=CFArrayGetCount(typeRef); index<count; index++) {
-                    ProcessUPSEventSource(CFArrayGetValueAtIndex(arrayRef, index), &upsEventTimer, &upsEventSource);
+                for (index=0, count=[arrayRef count]; index<count; index++) {
+                    ProcessUPSEventSource((__bridge CFTypeRef)[arrayRef objectAtIndex:index], &upsEventTimer, &upsEventSource);
                 }
-
-                CFRelease(arrayRef);
             } else {
                 ProcessUPSEventSource(typeRef, &upsEventTimer, &upsEventSource);
             }
@@ -504,7 +503,7 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
             }
 
             if (upsEventTimer) {
-                CFRunLoopAddTimer(CFRunLoopGetCurrent(), upsEventTimer, kCFRunLoopDefaultMode);
+                CFRunLoopAddTimer(CFRunLoopGetCurrent(), (__bridge CFRunLoopTimerRef)upsEventTimer, kCFRunLoopDefaultMode);
             }
         }
         // Couldn't grab the new interface.  Fallback on the old.
@@ -628,9 +627,8 @@ void UPSDeviceAdded(void *refCon, io_iterator_t iterator)
             }
 
             if (upsEventTimer) {
-                CFRunLoopRemoveTimer(CFRunLoopGetCurrent(), upsEventTimer,
+                CFRunLoopRemoveTimer(CFRunLoopGetCurrent(), (__bridge CFRunLoopTimerRef)upsEventTimer,
                                      kCFRunLoopDefaultMode);
-                CFRelease(upsEventTimer);
                 upsEventTimer = NULL;
             }
         }
@@ -659,9 +657,8 @@ static void releaseHidDataSourceResources(UPSDataRef upsDataRef)
 
     if (upsDataRef->upsEventTimer) {
         CFRunLoopRemoveTimer(CFRunLoopGetCurrent(),
-                             upsDataRef->upsEventTimer,
+                             (__bridge CFRunLoopTimerRef)upsDataRef->upsEventTimer,
                              kCFRunLoopDefaultMode);
-        CFRelease(upsDataRef->upsEventTimer);
         upsDataRef->upsEventTimer = NULL;
     }
 
@@ -820,15 +817,13 @@ void ProcessUPSEvent(UPSDataRef upsDataRef, CFDictionaryRef event)
                 BatteryCaseSetDeviceCurrentLimit(values[index]);
             }
 
-            CFDictionarySetValue(upsDataRef->upsStoreDict, keys[index],
-                                 values[index]);
+            CFDictionarySetValue(upsDataRef->upsStoreDict, keys[index], values[index]);
         }
 
         free (keys);
         free (values);
 
-        IOReturn result = IOPSSetPowerSourceDetails(upsDataRef->powerSourceID,
-                                                    upsDataRef->upsStoreDict);
+        IOReturn result = IOPSSetPowerSourceDetails(upsDataRef->powerSourceID, upsDataRef->upsStoreDict);
         if (result != kIOReturnSuccess) {
             ERROR_LOG("updating power source details failed\n");
         }
@@ -907,6 +902,7 @@ void BatteryCaseHandleAdapterFamilyChange(UPSDataRef upsDataRef, CFTypeRef adapt
     // NOOP on OS X
 }
 
+
 //---------------------------------------------------------------------------
 // BatteryCaseHandleACStateChange
 //
@@ -967,7 +963,7 @@ UPSDataRef GetPrivateData(CFDictionaryRef properties) {
         (data = CFDataCreateMutable(kCFAllocatorDefault,
                                     sizeof(UPSData)))) {
         upsDataRef = (UPSDataRef)CFDataGetMutableBytePtr(data);
-        bzero(upsDataRef, sizeof(UPSData));
+        bzero((void *)upsDataRef, sizeof(UPSData));
         
         CFArrayAppendValue(gUPSDataArrayRef, data);
         CFRelease(data);
@@ -1059,8 +1055,7 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
     // a USB Product Name.  If that fails then use the manufacturer and if
     // that fails, then use a generic name.  Couldn't we use a serial # here?
     //
-    upsName = (CFStringRef) CFDictionaryGetValue(properties,
-                                                 CFSTR(kIOPSNameKey));
+    upsName = (CFStringRef) CFDictionaryGetValue(properties, CFSTR(kIOPSNameKey));
     if (!upsName && !CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSNameKey))) {
         upsName = CFSTR(kDefaultUPSName);
     }
@@ -1068,36 +1063,30 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSNameKey), upsName);
     }
 
-    transport = (CFStringRef) CFDictionaryGetValue(properties,
-                                                   CFSTR(kIOPSTransportTypeKey));
+    transport = (CFStringRef) CFDictionaryGetValue(properties, CFSTR(kIOPSTransportTypeKey));
     if (transport) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), transport);
     } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSTransportTypeKey))) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTransportTypeKey), CFSTR(kDefaultTransport));
     }
 
-    vid = (CFNumberRef) CFDictionaryGetValue(properties,
-                                             CFSTR(kIOPSVendorIDKey));
-    pid = (CFNumberRef) CFDictionaryGetValue(properties,
-                                             CFSTR(kIOPSProductIDKey));
-    modelNum = (CFNumberRef) CFDictionaryGetValue(properties,
-                                                  CFSTR(kIOPSModelNumber));
+    vid = (CFNumberRef) CFDictionaryGetValue(properties, CFSTR(kIOPSVendorIDKey));
+    pid = (CFNumberRef) CFDictionaryGetValue(properties, CFSTR(kIOPSProductIDKey));
+    modelNum = (CFNumberRef) CFDictionaryGetValue(properties, CFSTR(kIOPSModelNumber));
 
     CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsPresentKey), kCFBooleanTrue);
     if (upsDataRef->deviceType == kDeviceTypeUPS) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanTrue);
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), CFSTR(kIOPSACPowerValue));
     } else {
-        CFBooleanRef boolean = (CFBooleanRef) CFDictionaryGetValue(properties,
-                                                                 CFSTR(kIOPSIsChargingKey));
+        CFBooleanRef boolean = (CFBooleanRef) CFDictionaryGetValue(properties, CFSTR(kIOPSIsChargingKey));
         if (boolean) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), boolean);
         } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSIsChargingKey))) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSIsChargingKey), kCFBooleanFalse);
         }
 
-        CFStringRef string = (CFStringRef) CFDictionaryGetValue(properties,
-                                                                CFSTR(kIOPSPowerSourceStateKey));
+        CFStringRef string = (CFStringRef) CFDictionaryGetValue(properties, CFSTR(kIOPSPowerSourceStateKey));
         if (string) {
             CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey), string);
         } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSPowerSourceStateKey))) {
@@ -1116,13 +1105,11 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
     }
 
     psID = MAKE_UNIQ_SOURCE_ID(getpid(), upsDataRef->upsID);
-    number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                            &psID);
+    number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &psID);
     CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSPowerSourceIDKey), number);
     CFRelease(number);
 
-    number = (CFNumberRef) CFDictionaryGetValue(properties,
-                                                CFSTR(kIOPSMaxCapacityKey));
+    number = (CFNumberRef) CFDictionaryGetValue(properties, CFSTR(kIOPSMaxCapacityKey));
     if (number) {
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSMaxCapacityKey), number);
     } else if (!CFDictionaryContainsKey(upsStoreDict, CFSTR(kIOPSMaxCapacityKey))) {
@@ -1193,8 +1180,7 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
         // answer should device by proper exponent to get back to Volts.
         //
         elementValue = 13 * 1000 / 100;
-        number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType,
-                                &elementValue);
+        number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &elementValue);
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSVoltageKey), number);
         CFRelease(number);
     }
@@ -1220,6 +1206,7 @@ IOReturn PopulateUpsStoreDict(UPSDataRef upsDataRef,
     }
     else
         CFDictionarySetValue(upsStoreDict, CFSTR(kIOPSTypeKey), CFSTR(kIOPSUPSType));
+
 
     return kIOReturnSuccess;
 }

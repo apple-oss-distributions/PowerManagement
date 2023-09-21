@@ -22,6 +22,7 @@
  */
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <Foundation/Foundation.h>
 #include <CoreFoundation/CFDateFormatter.h>
 
 #include <SystemConfiguration/SystemConfiguration.h>
@@ -129,9 +130,7 @@
 #if TARGET_OS_OSX
 #define ARG_VACT            "vactdisabled"
 #define ARG_LOWPOWERMODE    "lowpowermode"
-#if !RC_HIDE_J316
 #define ARG_HIGHPOWERMODE   "highpowermode"
-#endif // !RC_HIDE_J316
 #define ARG_CUSTOMPOWERMODE "powermode"
 #endif // TARGET_OS_OSX
 
@@ -327,9 +326,7 @@ PMFeature all_features[] =
 #if TARGET_OS_OSX
     { kIOPMVact,                    ARG_VACT },
     { kIOPMLowPowerModeKey,         ARG_LOWPOWERMODE},
-#if !RC_HIDE_J316
     { kIOPMHighPowerModeKey,        ARG_HIGHPOWERMODE},
-#endif // !RC_HIDE_J316
 #endif // TARGET_OS_OSX
 };
 
@@ -933,7 +930,7 @@ io_registry_entry_t _getRootDomain(void)
 }
 
 
-static void swd_debugTrig()
+static void swd_debugTrig(void)
 {
     io_service_t                rootDomainService = IO_OBJECT_NULL;
     io_connect_t                gRootDomainConnect = IO_OBJECT_NULL;
@@ -972,7 +969,7 @@ exit:
 }
 
 
-static void displaySleepNow()
+static void displaySleepNow(void)
 {
 #if SLSDISPLAYMANAGER
     CGError err = SLSDisplayManagerRequestDisplaysIdle();
@@ -1074,15 +1071,21 @@ static void show_pm_settings_dict(
     char                    ps[kMaxArgStringLength];
     CFStringRef             *keys;
     CFTypeRef               *vals;
-    CFTypeRef               ps_blob;
+    CFTypeRef               ps_blob = NULL;
     CFStringRef             activeps = NULL;
     int                     show_override_type = 0;
     bool                    show_display_dim = false;
 
+#if TARGET_OS_OSX
     ps_blob = IOPSCopyPowerSourcesInfo();
     if(ps_blob) {
+#else
+    IOReturn status = IOPSCopyPowerSourcesInfoPrecise(&ps_blob);
+    if(status == kIOReturnSuccess && ps_blob) {
+#endif
         activeps = IOPSGetProvidingPowerSourceType(ps_blob);
     }
+
     if(!activeps) activeps = CFSTR(kIOPMACPowerKey);
     if(activeps) CFRetain(activeps);
 
@@ -1127,19 +1130,15 @@ static void show_pm_settings_dict(
                 show_override_type = _kIOPMAssertionSystemOn;
             }
 #if TARGET_OS_OSX
-#if !RC_HIDE_J316
         } else if (strcmp(ps, kIOPMHighPowerModeKey) == 0) {
             // While displaying settings we either show a tri-state "powermode [0,1,2]" where 0 is OFF,
             // 1 is LPM, 2 is HPM. OR if HPM isn't supported, we show "lowpowermode [0,1]"
             // Ignore the key reported by dictionary which is only useful to know if the feature is supported
             continue;
-#endif // !RC_HIDE_J316
         } else if (strcmp(ps, kIOPMLowPowerModeKey) == 0) {
-#if !RC_HIDE_J316
             if (IOPMFeatureIsAvailable(CFSTR(kIOPMHighPowerModeKey), activeps)) {
                 printf(" %-20s ", ARG_CUSTOMPOWERMODE);
             } else
-#endif // !RC_HIDE_J316
                 printf(" %-20s ", ARG_LOWPOWERMODE);
 #endif // TARGET_OS_OSX
         } else {
@@ -2105,6 +2104,7 @@ exit:
 /*                                                                            */
 /******************************************************************************/
 
+
 #define kMaxHealthLength            10
 #define kMaxNameLength              60
 
@@ -2148,17 +2148,36 @@ static void show_power_sources(char **argv, int which)
     int                 rawExternalConnected = -1;
     int                 _id = 0;
     bool                xml = false;
+#if !TARGET_OS_OSX
+    IOReturn            status = kIOReturnSuccess;
+#endif
+
 
     if (which & kApplyToAccessories) {
+#if TARGET_OS_OSX
         ps_info = IOPSCopyPowerSourcesByType(kIOPSSourceAll);
+#else
+        status = IOPSCopyPowerSourcesByTypePrecise(kIOPSSourceAll, &ps_info);
+#endif
     }
     else {
+#if TARGET_OS_OSX
         ps_info = IOPSCopyPowerSourcesInfo();
+#else
+        status = IOPSCopyPowerSourcesInfoPrecise(&ps_info);
+#endif
     }
+#if TARGET_OS_OSX
     if(!ps_info) {
         printf("No power source info available\n");
         return;
     }
+#else
+    if(status != kIOReturnSuccess) {
+        printf("Failure querying power source information with err: 0x%x.\n", status);
+        return;
+    }
+#endif
 
     if (isBatteryPollingStopped()) {
         printf("* Battery Polling is Stopped\n");
@@ -2638,6 +2657,7 @@ static void show_assertions_individually(CFDictionaryRef assertions_info, void (
 
                 char                    assertionType[400];
                 char                    val_buf[300];
+                char                    resource_buf[256];
                 char                    *assertionName = NULL;
                 bool                    timed_out = false;
                 int                     createdSince = 0;
@@ -2720,6 +2740,22 @@ static void show_assertions_individually(CFDictionaryRef assertions_info, void (
                         buf[0] = 0;
                         CFStringGetCString(strRef, buf, sizeof(buf), kCFStringEncodingMacRoman);
                         if (!printer) printf("Description: %s", buf);
+                    }
+                    if (!printer) printf("\n");
+                }
+
+                CFArrayRef resources = CFDictionaryGetValue(tmp_dict, kIOPMAssertionResourcesUsed);
+                if (isA_CFArray(resources)) {
+                    CFIndex count = CFArrayGetCount(resources);
+                    if (count) {
+                        if (!printer) printf("\tResources: ");
+                    }
+                    for(int i=0; i<count; i++) {
+                        CFStringRef resource_name = CFArrayGetValueAtIndex(resources, i);
+                        if (isA_CFString(resource_name)) {
+                            CFStringGetCString(resource_name, resource_buf, sizeof(resource_buf), kCFStringEncodingMacRoman);
+                            if (!printer) printf("%s ", resource_buf);
+                        }
                     }
                     if (!printer) printf("\n");
                 }
@@ -3608,7 +3644,7 @@ static void print_raw_battery_state(io_registry_entry_t b_reg)
     int                     design_cap = -1;
     int                     cur_cycles = -1;
     CFMutableDictionaryRef  prop = NULL;
-    IOReturn                ret;
+    IOReturn                ret = kIOReturnSuccess;
 
     loc = CFLocaleCopyCurrent();
     date_format = CFDateFormatterCreate(kCFAllocatorDefault, loc,
@@ -4410,7 +4446,6 @@ static int checkAndSetPowerModeIntValue(
                     goto exit;
                 }
                 break;
-#if !RC_HIDE_J316
             case 2:
                 if (!IOPMFeatureIsAvailable(CFSTR(kIOPMHighPowerModeKey), CFSTR(kIOPMBatteryPowerKey))) {
                     ret = -1;
@@ -4433,7 +4468,6 @@ static int checkAndSetPowerModeIntValue(
                     goto exit;
                 }
                 break;
-#if !RC_HIDE_J316
             case 2:
                 if (!IOPMFeatureIsAvailable(CFSTR(kIOPMHighPowerModeKey), CFSTR(kIOPMACPowerKey))) {
                     ret = -1;
@@ -7509,7 +7543,8 @@ static void show_details_for_UUID( char **argv ) {
   CFRelease(uuid);
 }
 
-static void _print_uuid_string(){
+static void _print_uuid_string(void)
+{
     CFStringRef     _uuid = IOPMSleepWakeCopyUUID();
     char            str[kMaxLongStringLength];
 

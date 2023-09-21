@@ -288,6 +288,7 @@ static void setSystemSleepStateTracking(IOPMCapabilityBits);
 
 static void scheduleSleepServiceCapTimerEnforcer(uint32_t cap_ms);
 
+
 /* Hide SleepServices code for public OS seeds. 
  * We plan to re-enable this code for shipment.
  * ETB 1/24/12
@@ -841,7 +842,7 @@ kern_return_t _io_pm_connection_acknowledge_event
 
         if (requestDate) {
             if ((kACPowered == _getPowerSource())
-                || (getTCPKeepAliveState(NULL, 0) == kActive))
+                || (getTCPKeepAliveState(NULL, 0, false) == kActive))
             {
                 foundResponse->maintenanceRequested = CFDateGetAbsoluteTime(requestDate);
             }
@@ -861,15 +862,10 @@ kern_return_t _io_pm_connection_acknowledge_event
              *
              * kIOPMAckWakeDate
              * kIOPMAckNetworkMaintenanceWakeDate
-             * kIOPMAckSUWakeDate
              */
             requestDate = isA_CFDate(CFDictionaryGetValue(ackOptionsDict, kIOPMAckWakeDate));
             if (!requestDate) {
                 requestDate = isA_CFDate(CFDictionaryGetValue(ackOptionsDict, kIOPMAckNetworkMaintenanceWakeDate));
-            }
-
-            if (!requestDate) {
-                requestDate = isA_CFDate(CFDictionaryGetValue(ackOptionsDict, kIOPMAckSUWakeDate));
             }
 
             if (requestDate
@@ -877,6 +873,17 @@ kern_return_t _io_pm_connection_acknowledge_event
             {
                 foundResponse->maintenanceRequested = CFDateGetAbsoluteTime(requestDate);
             }
+
+            /*
+             * Caller requests a maintenance wake. These schedule on AC and Battery.
+             * kIOPMAckSUWakeDate
+             */
+            if (!requestDate) {
+                requestDate = isA_CFDate(CFDictionaryGetValue(ackOptionsDict, kIOPMAckSUWakeDate));
+                if (requestDate) {
+                    foundResponse->maintenanceRequested = CFDateGetAbsoluteTime(requestDate);                }
+            }
+
         }
 
         /* kIOPMAckBackgroundTaskWakeDate
@@ -1244,11 +1251,6 @@ static void setSystemSleepStateTracking(IOPMCapabilityBits capables)
     CFRelease(key);
 }
 
-#define IS_CAP_GAIN(c, f)       \
-        ((((c)->fromCapabilities & (f)) == 0) && \
-         (((c)->toCapabilities & (f)) != 0))
-
-
 #pragma mark -
 #pragma mark SleepServices
 
@@ -1384,7 +1386,7 @@ static void scheduleSleepServiceCapTimerEnforcer(uint32_t cap_ms)
     }
 }
 
-static void updateCapabilitiesToAllowBackgroundTasks()
+static void updateCapabilitiesToAllowBackgroundTasks(void)
 {
     /* Its been kPMSleepDurationForBT since sleep. We can allow background task if not already
      * allowed in Dark Wake
@@ -1413,6 +1415,7 @@ void cancelDarkWakeCapabilitiesTimer(void)
     }
 
 }
+
 
 
 #if LOG_SLEEPSERVICES
@@ -1674,7 +1677,7 @@ getPlatformSleepType(uint32_t *sleepType, uint32_t *standbyTimer)
 
 }
 
-static void startAutoPowerOffSleep( )
+static void startAutoPowerOffSleep(void)
 {
     uint32_t sleepType = kIOPMSleepTypeInvalid;
     CFTimeInterval nextAutoWake = 0.0;
@@ -1852,7 +1855,7 @@ static void handleLastCallMsg(void *messageData, CFStringRef sleepReason)
     bool sys_active = false;
     bool pending_wakes = false;
 
-    tcpka_active = ((getTCPKeepAliveState(NULL, 0) == kActive) && checkForActivesByType(kInteractivePushServiceType));
+    tcpka_active = ((getTCPKeepAliveState(NULL, 0, false) == kActive) && checkForActivesByType(kInteractivePushServiceType));
 
     sys_active = checkForActivesByType(kDeclareSystemActivityType);
     pending_wakes = (CFStringCompare(sleepReason, CFSTR(kIOPMIdleSleepKey), 0) == kCFCompareEqualTo) &&
@@ -2305,7 +2308,7 @@ static void PMConnectionPowerCallBack(
 
     capArgs = (typeof(capArgs)) messageData;
 
-    AutoWakeCapabilitiesNotification(capArgs->fromCapabilities, capArgs->toCapabilities);
+    AutoWakeCapabilitiesNotification(capArgs);
     ClockSleepWakeNotification(capArgs->fromCapabilities, capArgs->toCapabilities,
                                capArgs->changeFlags);
     PMSettingsCapabilityChangeNotification(capArgs);
@@ -2421,7 +2424,6 @@ static void PMConnectionPowerCallBack(
 
         // reset display state
         resetDisplayState();
-        gEmergencySleep = false;
 #endif
         incrementSleepCnt();
         logAwakeTime();
@@ -3381,6 +3383,7 @@ static bool checkResponses_ScheduleWakeEvents(PMResponseWrangler *wrangler)
     }
 
 
+
     // Disable all dark wake requests if system is going to standby and kIOPMDestroyFVKeyOnStandbyKey
     // is set. This is done by resetting earliestWake to kCFAbsoluteTimeIntervalSince1904
 #if !(TARGET_OS_OSX && TARGET_CPU_ARM64)
@@ -3918,11 +3921,29 @@ __private_extern__ void _set_sleep_revert(bool state)
     gMachineStateRevertible = state;
 }
 
-__private_extern__ bool _can_revert_sleep(void)
+__private_extern__ bool _woke_up_after_lastcall(void)
 {
     uint64_t wakeabs_ts = 0;
     size_t size = sizeof(wakeabs_ts);
     int ret;
+
+    ret = sysctlbyname("kern.wake_abs_time", &wakeabs_ts, &size, NULL, 0);
+    if (ret) {
+        ERROR_LOG("Failed to read sysctl 'kern.wake_abs_time'\n");
+        return false;
+    }
+
+    INFO_LOG("wake_ts:0x%llx lastcall_ts:0x%llx\n", wakeabs_ts, lastcall_ts);
+    if (wakeabs_ts > lastcall_ts) {
+        // system is waking up
+        return true;
+    }
+    return false;
+
+}
+
+__private_extern__ bool _can_revert_sleep(void)
+{
     bool revertible = gMachineStateRevertible;
 
     if (!gMachineStateRevertible) {
@@ -3932,18 +3953,7 @@ __private_extern__ bool _can_revert_sleep(void)
          * when sytem is waking up, until "WillPowerOn" is received and machine
          * sleep state is revertible in that duration.
          */
-
-        ret = sysctlbyname("kern.wake_abs_time", &wakeabs_ts, &size, NULL, 0);
-        if (ret) {
-            ERROR_LOG("Failed to read sysctl 'kern.wake_abs_time'\n");
-            return gMachineStateRevertible;
-        }
-
-        if (wakeabs_ts > lastcall_ts) {
-            // system is waking up
-            revertible = true;
-        }
-        INFO_LOG("wake_ts:0x%llx lastcall_ts:0x%llx\n", wakeabs_ts, lastcall_ts);
+        revertible = _woke_up_after_lastcall();
     }
     INFO_LOG("Sleep revert state: %d\n", revertible);
     return revertible;

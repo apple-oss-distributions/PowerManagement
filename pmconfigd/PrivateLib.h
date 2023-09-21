@@ -77,6 +77,12 @@
 #define CHANGED_CAP_BITS(x, y)              ((x) ^ (y))
 #define BIT_IS_SET(x,b)                     ((x & b)==b)
 #define BIT_IS_NOT_SET(x,b)                 ((x & (b))==0)
+#define IS_CAP_GAIN(c, f)       \
+        ((((c)->fromCapabilities & (f)) == 0) && \
+         (((c)->toCapabilities & (f)) != 0))
+#define IS_CAP_LOSS(c, f)       \
+        ((((c)->fromCapabilities & (f)) != 0) && \
+         (((c)->toCapabilities & (f)) == 0))
 
 /* gDebugFlags bits */
 #define kIOPMDebugAssertionASLLog           0x01
@@ -89,21 +95,26 @@
 #define kIOPMDebugLogAssertionNameChange    0x80
 
 
-#define PM_LOG_SYSTEM       "com.apple.powerd"
-#define SYSLOAD_LOG         "systemLoad"
-#define AGGD_REPORTS_LOG    "aggdReport"
-#define BATTERY_LOG         "battery"
-#define BATTERY_HEALTH_LOG  "batteryhealth"
-#define ASSERTIONS_LOG      "assertions"
-#define PMSETTINGS_LOG      "pmSettings"
-#define SLEEPWAKE_LOG       "sleepWake"
-#define ADAPTIVEDISPLAY_LOG "adaptiveDisplay"
-#define WAKEREQUESTS_LOG    "wakeRequests"
-#define DISPLAY_LOG         "displayState"
-#define LOW_POWER_MODE_LOG  "lowPowerMode"
-#define PREFS_LOG           "prefs"
-#define BDC_LOG             "BDC"
-#define SMART_POWER_NAP_LOG "smartPowerNap"
+#define PM_LOG_SYSTEM               "com.apple.powerd"
+#define SYSLOAD_LOG                 "systemLoad"
+#define AGGD_REPORTS_LOG            "aggdReport"
+#define BATTERY_LOG                 "battery"
+#define BATTERY_HEALTH_LOG          "batteryhealth"
+#define ASSERTIONS_LOG              "assertions"
+#define PMSETTINGS_LOG              "pmSettings"
+#define SLEEPWAKE_LOG               "sleepWake"
+#define ADAPTIVEDISPLAY_LOG         "adaptiveDisplay"
+#define WAKEREQUESTS_LOG            "wakeRequests"
+#define DISPLAY_LOG                 "displayState"
+#define LOW_POWER_MODE_LOG          "lowPowerMode"
+#define PREFS_LOG                   "prefs"
+#define BDC_LOG                     "BDC"
+#define SMART_POWER_NAP_LOG         "smartPowerNap"
+#define CORE_SMART_POWER_NAP_LOG    "coreSmartPowerNap"
+#define CHARGE_CONTROL_LOG          "charging"
+#define USBDEVICEMODE_LOG           "usbdevicemode"
+#define BATTERY_AUTH_LOG            "batteryAuth"
+#define WAKE_PERF_LOG               "wakePerfLog"
 
 #ifndef LOG_STREAM
 #define LOG_STREAM OS_LOG_DEFAULT

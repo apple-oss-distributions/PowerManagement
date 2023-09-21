@@ -110,6 +110,10 @@ __private_extern__ void blankDisplay(void)
 __private_extern__ bool canSustainFullWake(void)
 {
     if (isEmergencySleep()) {
+        if (_woke_up_after_lastcall()) {
+            INFO_LOG("Can sustain full wake after emergency sleep, we have woken up since.");
+            return true;
+        }
         INFO_LOG("Cannot sustain full wake due to emergency sleep");
         return false;
     }
@@ -241,7 +245,7 @@ __private_extern__ uint64_t inFlightDimRequest(void)
     return gDimRequest;
 }
 
-__private_extern__ void resetDisplayState()
+__private_extern__ void resetDisplayState(void)
 {
     if (gDisplayOn) {
         INFO_LOG("Resetting display state to off on sleep");
@@ -612,7 +616,7 @@ void displayStateDidChange(uint64_t state)
     }
 }
 
-uint32_t rootDomainClamshellState()
+uint32_t rootDomainClamshellState(void)
 {
     CFBooleanRef clamshell_state = NULL;
     uint32_t result = kPMClamshellUnknown;

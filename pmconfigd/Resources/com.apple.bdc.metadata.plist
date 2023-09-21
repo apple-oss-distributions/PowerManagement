@@ -28,6 +28,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -53,6 +55,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -78,6 +82,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -103,6 +109,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -128,6 +136,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -153,6 +163,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -178,6 +190,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -203,6 +217,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -228,6 +244,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -253,6 +271,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -278,6 +298,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -303,6 +325,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -328,6 +352,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -353,6 +379,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -378,6 +406,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -403,6 +433,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -428,6 +460,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -453,6 +487,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -478,6 +514,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -503,6 +541,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -528,6 +568,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -553,6 +595,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -578,6 +622,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -603,6 +649,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -628,6 +676,35 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>subsystem</key>
+			<string>BatteryDataCollection</string>
+			<key>timeToLive</key>
+			<integer>365</integer>
+			<key>mode</key>
+			<integer>1</integer>
+			<key>name</key>
+			<string>MiscStatus</string>
+			<key>category</key>
+			<string>BDC_SBC</string>
+			<key>unit</key>
+			<dict>
+				<key>symbol</key>
+				<string></string>
+			</dict>
+			<key>version</key>
+			<real>2.5</real>
+			<key>datatype</key>
+			<integer>7</integer>
+			<key>storage</key>
+			<integer>1</integer>
+			<key>enabledPopulation</key>
+			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -653,6 +730,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -678,6 +757,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -703,6 +784,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -728,6 +811,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>timeToLive</key>
@@ -753,6 +838,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -778,6 +865,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -803,6 +892,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -828,6 +919,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -853,6 +946,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -878,6 +973,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -903,6 +1000,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -928,6 +1027,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -953,6 +1054,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -978,6 +1081,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -1003,6 +1108,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -1028,6 +1135,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -1053,6 +1162,8 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -1078,6 +1189,35 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>subsystem</key>
+			<string>BatteryDataCollection</string>
+			<key>timeToLive</key>
+			<integer>365</integer>
+			<key>mode</key>
+			<integer>1</integer>
+			<key>name</key>
+			<string>DecisionMaker</string>
+			<key>category</key>
+			<string>BDC_SmartCharging</string>
+			<key>unit</key>
+			<dict>
+				<key>symbol</key>
+				<string></string>
+			</dict>
+			<key>version</key>
+			<real>2.1</real>
+			<key>datatype</key>
+			<integer>7</integer>
+			<key>storage</key>
+			<integer>1</integer>
+			<key>enabledPopulation</key>
+			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
 		<dict>
 			<key>subsystem</key>
@@ -1103,7 +1243,118 @@
 			<integer>1</integer>
 			<key>enabledPopulation</key>
 			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
 		</dict>
+		<dict>
+			<key>subsystem</key>
+			<string>BatteryDataCollection</string>
+			<key>timeToLive</key>
+			<integer>365</integer>
+			<key>mode</key>
+			<integer>1</integer>
+			<key>name</key>
+			<string>AccumulatedSystemLoad</string>
+			<key>category</key>
+			<string>BDC_SBC</string>
+			<key>unit</key>
+			<dict>
+				<key>symbol</key>
+				<string>mW</string>
+			</dict>
+			<key>version</key>
+			<real>2.1</real>
+			<key>datatype</key>
+			<integer>7</integer>
+			<key>storage</key>
+			<integer>1</integer>
+			<key>enabledPopulation</key>
+			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>subsystem</key>
+			<string>BatteryDataCollection</string>
+			<key>timeToLive</key>
+			<integer>365</integer>
+			<key>mode</key>
+			<integer>1</integer>
+			<key>name</key>
+			<string>AccumulatedSystemPowerIn</string>
+			<key>category</key>
+			<string>BDC_SBC</string>
+			<key>unit</key>
+			<dict>
+				<key>symbol</key>
+				<string>mW</string>
+			</dict>
+			<key>version</key>
+			<real>2.1</real>
+			<key>datatype</key>
+			<integer>7</integer>
+			<key>storage</key>
+			<integer>1</integer>
+			<key>enabledPopulation</key>
+			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>timeToLive</key>
+			<integer>1095</integer>
+			<key>subsystem</key>
+			<string>BatteryDataCollection</string>
+			<key>mode</key>
+			<integer>1</integer>
+			<key>name</key>
+			<string>LowVoltageResidency</string>
+			<key>category</key>
+			<string>BDC_Weekly</string>
+			<key>unit</key>
+			<dict>
+				<key>symbol</key>
+				<string></string>
+			</dict>
+			<key>version</key>
+			<real>2.2</real>
+			<key>datatype</key>
+			<integer>3</integer>
+			<key>storage</key>
+			<integer>1</integer>
+			<key>enabledPopulation</key>
+			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>subsystem</key>
+			<string>BatteryDataCollection</string>
+			<key>timeToLive</key>
+			<integer>365</integer>
+			<key>mode</key>
+			<integer>1</integer>
+			<key>name</key>
+			<string>VirtualTemperature</string>
+			<key>category</key>
+			<string>BDC_SBC</string>
+			<key>unit</key>
+			<dict>
+				<key>symbol</key>
+				<string>centi C</string>
+			</dict>
+			<key>version</key>
+			<real>2.3</real>
+			<key>datatype</key>
+			<integer>7</integer>
+			<key>storage</key>
+			<integer>1</integer>
+			<key>enabledPopulation</key>
+			<integer>3</integer>
+			<key>privacyClassification</key>
+			<integer>1</integer>
+		</dict>
+
 	</array>
 </dict>
 </plist>

@@ -7,6 +7,11 @@
 		<key>Enabled</key>
 		<true/>
 	</dict>
+	<key>CoreSmartPowerNapLocation</key>
+	<dict>
+		<key>Enabled</key>
+		<false/>
+	</dict>
 	<key>SystemAssertionTimeout</key>
 	<dict>
 		<key>Enabled</key>
@@ -21,6 +26,16 @@
 	<dict>
 		<key>Enabled</key>
 		<true/>
+	</dict>
+	<key>CoreSmartPowerNap</key>
+	<dict>
+		<key>Enabled</key>
+		<true/>
+	</dict>
+	<key>dossier</key>
+	<dict>
+		<key>DevelopmentPhase</key>
+		<string>FeatureComplete</string>
 	</dict>
 </dict>
 </plist>
