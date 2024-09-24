@@ -46,6 +46,7 @@
 #import "AppleSmartBatteryKeys.h"
 #include <os/feature_private.h>
 #include <TargetConditionals.h>
+#include "PowerManagementSignposts.h"
 
 
 #if TARGET_OS_IPHONE || POWERD_IOS_XCTEST
@@ -70,6 +71,7 @@
 #include "IOUPSPrivate.h"
 #include "BatteryData.h"
 #include "BatteryCapacityCalibration.h"
+#include "AppleSmartBatteryKeysPrivate.h"
 
 #define QUOTIENT_OF_5(soc) (soc/5)
 #define ROUND_TO_MULTIPLE_OF_5(soc) abs((5 * QUOTIENT_OF_5(soc)) - soc) < abs((5 * (QUOTIENT_OF_5(soc)+1)) - soc) ? (5 * QUOTIENT_OF_5(soc)) : (5 * (QUOTIENT_OF_5(soc)+1))
@@ -171,6 +173,8 @@ static dispatch_queue_t batteryTimeRemainingQ;
 static int currentPercentRemaining = 0;
 static long physicalBatteriesCount = 0;
 static CFStringRef gBatterySerialNumber = NULL;
+static NSNumber *gDeviceSupportsBatteryInformation = nil;
+
 
 #pragma mark - Battery Health Recalibration
 /*
@@ -250,7 +254,7 @@ typedef enum: unsigned long {
 #if TARGET_OS_IPHONE || POWERD_IOS_XCTEST || TARGET_OS_OSX
 uint64_t batteryHealthUPOAware = 0;
 uint32_t battReadTimeDelta = kMinTimeDeltaForBattRead; // Time delta between reading battery data for battery health evaluation
-#endif
+#endif // TARGET_OS_IPHONE || POWERD_IOS_XCTEST || TARGET_OS_OSX
 #if TARGET_OS_IPHONE || POWERD_IOS_XCTEST
 bool smcBasedDevice = false;
 bool nccp_cc_filtering = true;  // Support for NCCP filtering using CycleCount
@@ -260,7 +264,7 @@ void removeKeyFromBatteryHealthDataPrefs(CFStringRef key);
 void saveBatteryHealthDataToPrefs(CFDictionaryRef bhData);
 CFDictionaryRef copyBatteryHealthDataFromPrefs(void);
 CFDictionaryRef copyPowerlogBatteryHealthData(void);
-#endif
+#endif // TARGET_OS_IPHONE || POWERD_IOS_XCTEST
 
 // forward declarations
 STATIC PSStruct         *iops_newps(int pid, int psid);
@@ -277,13 +281,14 @@ static void BatteryTimeRemaining_finishSync(void);
 static void btr_recordFDREvent(int eventType, bool checkStandbyStatus);
 #if TARGET_OS_IOS || POWERD_IOS_XCTEST || TARGET_OS_WATCH || TARGET_OS_OSX
 STATIC CFMutableDictionaryRef copyBatteryHealthData(void);
-#endif
+#endif // TARGET_OS_IOS || POWERD_IOS_XCTEST || TARGET_OS_WATCH || TARGET_OS_OSX
+
 
 #if TARGET_OS_IOS || POWERD_IOS_XCTEST || TARGET_OS_WATCH
 static void updateCalibration0Flags(CFMutableDictionaryRef bhData, CFDictionaryRef batteryProps,
                              IOPSBatteryHealthServiceState prevSvcState, IOPSBatteryHealthServiceFlags prevSvcFlags,
                              IOPSBatteryHealthServiceState currentSvcState, IOPSBatteryHealthServiceFlags currentSvcFlags);
-#endif
+#endif // TARGET_OS_IOS || POWERD_IOS_XCTEST || TARGET_OS_WATCH
 
 #if TARGET_OS_OSX
 #define NVRAM_BATTERY_HEALTH_VER_MAJOR  1
@@ -927,9 +932,8 @@ static void ioregBatteryInterest(
     if (kIOPMMessageBatteryStatusHasChanged != messageType) {
         return;
     }
-
+    kdebug_trace(SYSTEMCHARGING_POWERD_HANDLE_BATTERY_STATUS_UPDATE, 0, 0, 0, 0);
     IOPMBattery *changed_batt = (IOPMBattery *)refcon;
-
     ioregBatteryProcess(changed_batt, batt);
 }
 
@@ -973,6 +977,7 @@ static IOPMBattery *_newBatteryFound(io_registry_entry_t where)
     return new_battery;
 }
 
+
 static void ioregBatteryMatch(
     void *refcon,
     io_iterator_t b_iter)
@@ -1010,6 +1015,7 @@ static void ioregBatteryMatch(
     dispatch_async(batteryTimeRemainingQ, ^() {
         startBatteryPoll(kImmediateFullPoll);
     });
+
 }
 
 static void initNotifictions(void)
@@ -1056,6 +1062,7 @@ __private_extern__ void BatteryTimeRemaining_prime(void)
                           &control.psTimeRemainingNotifyToken);
     notify_register_check(kIOPSNotifyPercentChange,
                           &control.psPercentChangeNotifyToken);
+
 
      // Initialize tracing battery events to FDR
      btr_recordFDREvent(kFDRInit, false);
@@ -1768,6 +1775,7 @@ static void HandlePublishAllPowerSources(void)
 
         INFO_LOG("Power Source change. Source:%{public}s", externalConnected ? "AC" : "Batt");
         notify_post(kIOPSNotifyPowerSource);
+        kdebug_trace(SYSTEMCHARGING_POWERD_PUBLISH_POWER_SOURCE_CHANGE, externalConnected, is_charging, showChargingUI, playChargingChime);
     }
 
     notify_post(kIOPSNotifyAnyPowerSource);
@@ -1888,8 +1896,8 @@ void updateBatteryServiceState(CFDictionaryRef battProps, CFMutableDictionaryRef
         else if (svcFlags & (kBHSvcFlagNCC)) {
             svcState = kBHSvcStateNominalChargeCapacity;
         }
-        else if (svcFlags & kBHSvcFlagRBATT) {
-            svcState = kBHSvcStateRBATT;
+        else if ([gDeviceSupportsBatteryInformation boolValue] && batteryCapacityMonitor_isQmaxUnknown(&svcFlags)) {
+            svcState = kBHSvcStateUnknown;
         }
         else if ((prevSvcState == kBHSvcStateUnknown) || (prevSvcState == kBHSvcStateNotDeterminable)) {
             svcState = kBHSvcStateNone;
@@ -1997,6 +2005,9 @@ __private_extern__ void batteryTimeRemainingGetBatteryHealthState(xpc_object_t c
             battState = kBatteryHealthStateServiceNeeded;
         } else if (svcState == kBHSvcStateNone) {
             battState = kBatteryHealthStateNormal;
+        } else if ((svcState == kBHSvcStateUnknown) && batteryCapacityMonitor_isQmaxUnknown(&svcFlags)) {
+            // Our view of the capacity is unknown, but the state was normal before we entered this unknown zone, hence the concise state info is 'normal'
+            battState = kBatteryHealthStateNormal;
         }
 
         DEBUG_LOG("%s: %d %s: %d", MK_KEY(IOPSBatteryHealthState), battState, MK_KEY(IOPSBatteryHealthServiceState), svcState);
@@ -2091,10 +2102,6 @@ STATIC uint32_t migrateSvcFlags(IOPSBatteryHealthServiceState oldSvcState, IOPSB
                 newFlags |= kBHSvcFlagNCC|kBHSvcFlagUPOPrime|kBHSvcFlagWRa;
                 break;
 
-            case kBHSvcStateRBATT:
-                newFlags |= kBHSvcStateRBATT;
-                break;
-
             case kBHSvcStateNotDeterminable:
                 // State was previously non-determinable. Ignore setting flags for now
                 // and set them after re-calculating the state.
@@ -2112,7 +2119,7 @@ STATIC uint32_t migrateSvcFlags(IOPSBatteryHealthServiceState oldSvcState, IOPSB
     }
     else if ((oldSvcFlags & kBHSvcVersionMask) == kBHSvcFlagsVersion1) {
         // Remove version number, un-used flags and flags indicating non-determinable condition
-        newFlags |= oldSvcFlags & (kBHSvcFlagRBATT|kBHSvcFlagUPOPrime|kBHSvcFlagNCC|kBHSvcFlagWRa|kBHSvcFlagBCDC);
+        newFlags |= oldSvcFlags & (kBHSvcFlagUPOPrime|kBHSvcFlagNCC|kBHSvcFlagWRa|kBHSvcFlagBCDC);
     }
     else {
         ERROR_LOG("Powerlog Service Flags 0x%x with version 0x%x is unexpected\n",
@@ -2219,9 +2226,61 @@ STATIC CFMutableDictionaryRef copyBatteryHealthData(void)
     IOPSBatteryHealthServiceState oldSvcState = 0;
     CFNumberRef oldMaxCapacity = NULL;
 
+    // auth check state/data
+    bool authOk = false;
+
+    /**
+     * If auth is not set, populate bhData with serviceFlags, keys showing no auth condition and bail early
+     * This in effect, disallows "read" access to the persistent storage if the battery is non-genuine or, if the auth process hasn't completed yet.
+     */
+    batteryAuthState authState = getBatteryAuthState();
+    switch (authState) {
+        case kBatteryAuthStateTrusted:
+        // treat auth not supported and trusted as same, retaining legacy behavior on non-auth devices
+        case kBatteryAuthStateNotSupported:
+            authOk = true;
+            break;
+        case kBatteryAuthStateUnTrusted:
+            oldSvcFlags |= kBHSvcFlagAuthFailure;
+            oldSvcState = kBHSvcStateAuthFailure;
+            break;
+        case kBatteryAuthStateUnknown:
+        default:
+            oldSvcFlags |= kBHSvcFlagAuthNotDet;
+            oldSvcState = kBHSvcStateUnknown;
+            break;
+    }
+
+    DEBUG_LOG("battery auth state: %d flags: 0x%x", authState, oldSvcFlags);
+    if (!authOk) {
+        CFMutableDictionaryRef authBhData = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (authBhData == NULL) {
+            ERROR_LOG("Failed to create dictionary to hold battery data\n");
+            return NULL;
+        }
+
+        oldSvcFlags |= kBatteryHealthCurrentVersion;
+        NSMutableDictionary *authBhDataNs = (__bridge NSMutableDictionary *) authBhData;
+        authBhDataNs[@kIOPSBatteryHealthServiceFlagsKey] = @(oldSvcFlags);
+        authBhDataNs[@kIOPSBatteryHealthServiceStateKey] = @(oldSvcState);
+        authBhDataNs[@kIOPSBatteryHealthMaxCapacityPercent] = @(-1);
+        return authBhData;
+    }
+
     dict = copyBatteryHealthDataFromPrefs();
     if (dict && (CFDictionaryGetCount(dict) != 0)) {
         bhData = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, dict);
+        NSMutableDictionary *bhDataNs = (__bridge NSMutableDictionary *) bhData;
+        IOPSBatteryHealthServiceFlags flags = [bhDataNs[@kIOPSBatteryHealthServiceFlagsKey] intValue];
+        /**
+         * workaround fix for rdar://118407371. whie the RCA is still unknown, this is a band-aid fix to recover from the stuck state even on passing auth.
+        */
+        if (authOk && (flags & (kBHSvcFlagAuthNotDet | kBHSvcFlagAuthFailure))) {
+            ERROR_LOG("Invalid auth flags detected: authOk:%d flags:0x%x", authOk, flags);
+            flags &= ~(kBHSvcFlagAuthNotDet | kBHSvcFlagAuthFailure);
+            bhDataNs[@kIOPSBatteryHealthServiceFlagsKey] = @(flags);
+            INFO_LOG("Invalid auth condition: recoveredflags:0x%x", [bhDataNs[@kIOPSBatteryHealthServiceFlagsKey] intValue]);
+        }
         CFRelease(dict);
         return bhData;
     }
@@ -2285,6 +2344,94 @@ STATIC CFMutableDictionaryRef copyBatteryHealthData(void)
 }
 
 
+
+
+static bool _batteryHealthServiceStateWraSupported = false;
+static void initBatteryHealthServiceStateWra(void)
+{
+    _internal_dispatch_assert_queue_barrier(batteryTimeRemainingQ);
+    if (MGIsiPhone()) {
+        int status, token;
+        status = notify_register_dispatch("com.apple.system.batteryHealth.p0Threshold", &token, batteryTimeRemainingQ,
+                ^(int token) {
+                    notify_get_state(token, &batteryHealthP0Threshold);
+                    INFO_LOG("Received notification for batteryHealthP0Threshold. Value set to %lld\n", batteryHealthP0Threshold);
+                });
+        if (status != NOTIFY_STATUS_OK) {
+            ERROR_LOG("Failed to register for P0 threshold notifications. rc=%d\n", status);
+        }
+        else {
+            notify_get_state(token, &batteryHealthP0Threshold);
+            INFO_LOG("batteryHealthP0Threshold set to %lld\n", batteryHealthP0Threshold);
+        }
+        // regardless of initialization failure, mark as supported as the failure above should lead to flagging a service state/flag
+        _batteryHealthServiceStateWraSupported = true;
+        return;
+    }
+ 
+    if (MGIsiPad() || MGIsWatch()) {
+        // No-op WRa and UPO checks for watch as they are not applicable.
+        // Can't entirely rely on this threshold to be a large value either as in certain cases of iPad battery replacement from a 3rd party the gauge may actually report bogus (high) wra value
+        // and trip the battery health logic unnecessarily. There needs to be a explicit state for supported/un-supported decision; a.k.a `_batteryHealthServiceStateWraSupported`
+        // `_batteryHealthServiceStateWraSupported` stays at its default value of `false` in this case.
+        batteryHealthP0Threshold = INT64_MAX;
+        INFO_LOG("batteryHealthP0Threshold set to %lld\n", batteryHealthP0Threshold);
+        return;
+    }
+    return;
+}
+
+static bool isSupportedBatteryHealthServiceStateWra(void)
+{
+    _internal_dispatch_assert_queue_barrier(batteryTimeRemainingQ);
+    return _batteryHealthServiceStateWraSupported;
+}
+
+static void initBatteryHealthServiceStateUPOAware(void)
+{
+
+    _internal_dispatch_assert_queue_barrier(batteryTimeRemainingQ);
+    if (MGIsiPhone()) {
+        int status, token;
+        status = notify_register_dispatch("com.apple.system.batteryHealth.UPOAware", &token, batteryTimeRemainingQ,
+                ^(int token) {
+                    notify_get_state(token, &batteryHealthUPOAware);
+                    INFO_LOG("Received notification for batteryHealthUPOAware. Value set to %lld\n", batteryHealthUPOAware);
+                });
+        if (status != NOTIFY_STATUS_OK) {
+            ERROR_LOG("Failed to register for battery health UPO Aware notifications. rc=%d\n", status);
+        }
+        else {
+            notify_get_state(token, &batteryHealthUPOAware);
+            INFO_LOG("batteryHealthUPOAware set to %lld\n", batteryHealthUPOAware);
+        }
+    }
+
+    if (MGIsiPad() || MGIsWatch()) {
+        batteryHealthUPOAware = kBatteryHealthWithoutUPO;
+        INFO_LOG("batteryHealthUPOAware set to %lld\n", batteryHealthUPOAware);
+    }
+    return;
+}
+
+static bool _batteryHealthServiceStateSupportedBCDC = false;
+static void initBatteryHealthServiceStateBCDC(void)
+{
+    _internal_dispatch_assert_queue_barrier(batteryTimeRemainingQ);
+    if (MGIsiPad() || MGIsWatch()) {
+       _batteryHealthServiceStateSupportedBCDC = false;
+    } else {
+       _batteryHealthServiceStateSupportedBCDC = true;
+    }
+    INFO_LOG("batteryHealthServiceBCDC support: %d", _batteryHealthServiceStateSupportedBCDC);
+}
+
+static bool isSupportedBatteryHealthServiceStateBCDC(void)
+{
+    _internal_dispatch_assert_queue_barrier(batteryTimeRemainingQ);
+    return _batteryHealthServiceStateSupportedBCDC;
+}
+
 static void _initBatteryHealthData(void)
 {
     int status;
@@ -2293,30 +2440,9 @@ static void _initBatteryHealthData(void)
 
     _internal_dispatch_assert_queue_barrier(batteryTimeRemainingQ);
 
-    status = notify_register_dispatch("com.apple.system.batteryHealth.p0Threshold", &token, batteryTimeRemainingQ,
-            ^(int token) {
-                notify_get_state(token, &batteryHealthP0Threshold);
-                INFO_LOG("Received notification for batteryHealthP0Threshold. Value set to %lld\n", batteryHealthP0Threshold);
-            });
-    if (status != NOTIFY_STATUS_OK) {
-        ERROR_LOG("Failed to register for P0 threshold notifications. rc=%d\n", status);
-    }
-    else {
-        notify_get_state(token, &batteryHealthP0Threshold);
-        INFO_LOG("batteryHealthP0Threshold set to %lld\n", batteryHealthP0Threshold);
-    }
-    status = notify_register_dispatch("com.apple.system.batteryHealth.UPOAware", &token, batteryTimeRemainingQ,
-            ^(int token) {
-                notify_get_state(token, &batteryHealthUPOAware);
-                INFO_LOG("Received notification for batteryHealthUPOAware. Value set to %lld\n", batteryHealthUPOAware);
-            });
-    if (status != NOTIFY_STATUS_OK) {
-        ERROR_LOG("Failed to register for battery health UPO Aware notifications. rc=%d\n", status);
-    }
-    else {
-        notify_get_state(token, &batteryHealthUPOAware);
-        INFO_LOG("batteryHealthUPOAware set to %lld\n", batteryHealthUPOAware);
-    }
+    initBatteryHealthServiceStateWra();
+    initBatteryHealthServiceStateUPOAware();
+    initBatteryHealthServiceStateBCDC();
 
     dict = copyBatteryHealthDataFromPrefs();
     if ((dict == NULL) || (CFDictionaryGetCount(dict) == 0)) {
@@ -2367,7 +2493,6 @@ STATIC void initBatteryHealthData(void)
 static bool calib0RelevantDevice(void)
 {
     bool relevant = false;
-#if HAS_MOBILE_GESTALT
     // Only run on D4x/N104, N14[0,1,2,4,6][b,s]
     relevant = MGIsDeviceOneOfType(MGPROD_D421,
                                    MGPROD_D431,
@@ -2385,7 +2510,6 @@ static bool calib0RelevantDevice(void)
                                    MGPROD_N157B,
                                    MGPROD_N158B,
                                    nil);
-#endif /* HAS_MOBILE_GESTALT */
     return relevant;
 }
 
@@ -2427,7 +2551,6 @@ static bool calibration0isShowingService(IOPSBatteryHealthServiceState svcState)
     if (svcState == kBHSvcStateNominalChargeCapacity ||
         svcState == kBHSvcStatePeakPowerCapacity ||
         svcState == kBHSvcStateNominalChargeAndPeakPower ||
-        svcState == kBHSvcStateRBATT ||
         svcState == kBHSvcStateBCDC) {
         // BHUI would have recommended service
         return true;
@@ -2643,13 +2766,91 @@ static void unstickCalibration1Data(CFMutableDictionaryRef bhData)
     return;
 }
 
+static int checkNominalCapacityTrusted(NSDictionary *trustedBatteryHealth, NSDictionary *bhDict, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    int maximumCapacity = -1;
+    if (bhDict[@kIOPSBatteryHealthMaxCapacityPercent]) {
+        maximumCapacity = [bhDict[@kIOPSBatteryHealthMaxCapacityPercent] intValue];
+        INFO_LOG("uninitialized maximum capacity in storage, init to (%d)", maximumCapacity);
+    }
+
+    if (trustedBatteryHealth[@kIOPSTrustedMaximumCapacity]) {
+        if (maximumCapacity == -1 || [trustedBatteryHealth[@kIOPSTrustedMaximumCapacity] intValue] <= maximumCapacity) { // Although monotonicity should be guaranteed from the gauge, still keep a safe check here 
+            maximumCapacity = [trustedBatteryHealth[@kIOPSTrustedMaximumCapacity] intValue];
+        } else {
+            ERROR_LOG("monotonicity interrupted saved (%d) incoming (%d)\n", maximumCapacity, [trustedBatteryHealth[@kIOPSTrustedMaximumCapacity] intValue]);
+        }
+    } else {
+        //error condition, should never happen!
+        ERROR_LOG("missing trusted maximumCapacity\n");
+        *svcFlags |= kBHSvcFlagNCCNotDet;
+
+    }
+    return maximumCapacity;
+}
+
+static bool isSupportedFreezeMaximumCapacity(void)
+{
+    return batteryCapacityMonitor_isCapacityQmaxAware() && [gDeviceSupportsBatteryInformation boolValue];
+}
+
+static bool isReadyFreezeMaximumCapacity(IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    if (!isSupportedFreezeMaximumCapacity()) {
+        return false;
+    }
+
+    /**
+     * [A] From the POV of backend logic, Freeze the max capacity for as long as kiosk mode is engaged OR qmax state is unknown, regardless of the qmax state. The UI may choose it whichever way to show the MC%,
+     * but for the backend, we will keep the MC frozen. The NCCp however keeps varying as usual and will be seen as-is in the telemetry.
+     * Main motivation behind this choice is to have the last value of MC before entering the kiosk mode as it would have been shown to the user and not
+     * lose track of it due to updates (NCC will artificially drop during kiosk mode for example). The saved MC from before the kiosk mode could be used in the reset logic and will be critical in the cases when a
+     * service due to NCC was present even before entering the kiosk mode, and at the time of reset we will allow to float the MC only uptil the value where it was
+     * before entering kiosk mode. If we choose not to freeze the MC in this manner, we would have to save the MC snapshot additionally, 'somewhere' before entering
+     * kiosk mode, especially in the case of a NCC based service already flagged.
+     *
+     * An example -
+     * 1. MC before entering kiosk mode = 79%, NCC based service shown
+     * 2. After entering kiosk mode, we keep updating MC and lose track of '79'
+     * 3. After all is done, and we come to reset MC,
+     * 3a. the current NCC happens to be 82% !!
+     *
+     * [B] Why wait for Qmax unknown state then? considering kiosk mode is out of picture and the NCC would come back to normal levels we could still unfreeze the backend MC safely?
+     * We choose not to as:
+     * 1. there could still be some rouge Qmax updates
+     * 2. as soon as kiosk mode flag is unlatched, there could be a stale NCC due to the latency in writing to the gauge->gauge update->SMC reading that update->ASBM displaying that; while all this while kiosk mode unlatch would
+     * be instant and will race against true NCC update travelling to powerd. While the fallout is only 1% in 5 cycles, and within safe enough bounds, we err on the side of caution and leave a good amount of settling time
+     * by not updating MC.
+    */
+    return batteryCapacityMonitor_isKioskModeEngaged(svcFlags) || batteryCapacityMonitor_isQmaxUnknown(svcFlags);
+}
+
+static bool isSupportedunFreezeMaximumCapacity(void)
+{
+    return batteryCapacityMonitor_isCapacityQmaxAware() && [gDeviceSupportsBatteryInformation boolValue];
+}
+
+static bool isReadyUnFreezeMaximumCapacity(IOPSBatteryHealthServiceFlags *prevSvcFlags, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    if (!isSupportedunFreezeMaximumCapacity()) {
+        return false;
+    }
+
+    return batteryCapacityMonitor_isQmaxUnknown(prevSvcFlags) && !batteryCapacityMonitor_isQmaxUnknown(svcFlags);
+}
+
+static bool isSupportedCapacityMonitoring(void)
+{
+    return batteryCapacityMonitor_isCapacityQmaxAware();
+}
+
 void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData,
         IOPSBatteryHealthServiceFlags *svcFlags)
 {
     int ncc = 0;
     int designCap = 0;
     int nccp = 0;
-    int prevNccp = -1;
+    int prevMaxCap = -1;
 
     if (svcFlags == NULL) {
         return;
@@ -2672,10 +2873,20 @@ void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef b
         }
     }
 
+    NSMutableDictionary *bhDict = (__bridge NSMutableDictionary *) bhData;
+    IOPSBatteryHealthServiceFlags prevSvcFlags = [bhDict[@kIOPSBatteryHealthServiceFlagsKey] intValue];
+    if (isSupportedCapacityMonitoring()) {
+        batteryCapactiyMonitorUpdate((__bridge NSDictionary *) batteryProps, bhDict, svcFlags, &prevSvcFlags);
+    }
+
+    NSDictionary *trustedBatteryHealth = batteryTrustedDataGetTrustedData();
+    if (MGIsiPhone() && trustedBatteryHealth != NULL && trustedBatteryHealth[@kIOPSTrustedDataEnabled] && [trustedBatteryHealth[@kIOPSTrustedDataEnabled] intValue] != 0 && bhDict != NULL) {
+        nccp = checkNominalCapacityTrusted(trustedBatteryHealth, bhDict, svcFlags);
+        goto out;
+    }
+
     CFDictionaryGetIntValue(batteryProps, CFSTR("NominalChargeCapacity"), ncc);
     CFDictionaryGetIntValue(batteryProps, CFSTR(kIOPMPSDesignCapacityKey), designCap);
-
-    CFDictionaryGetIntValue(bhData, CFSTR(kIOPSBatteryHealthMaxCapacityPercent), prevNccp);
 
     nccp = rawToNominal(ncc, designCap);
     if (!IS_IN_NOMINAL_RANGE(nccp)) {
@@ -2685,10 +2896,12 @@ void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef b
         return;
     }
 
+    CFDictionaryGetIntValue(bhData, CFSTR(kIOPSBatteryHealthMaxCapacityPercent), prevMaxCap);
 
-    // NOTE: nccp_cc_filtering is assumed to be true before we read SMC key. Assuming 'nccp_cc_filtering' is false can
-    // lead to sudden drop on MaxCapacity on devices that support CycleCount based filtering.
+
     if (nccp_cc_filtering == true) {
+        // NOTE: nccp_cc_filtering is assumed to be true before we read SMC key. Assuming 'nccp_cc_filtering' is false can
+        // lead to sudden drop on MaxCapacity on devices that support CycleCount based filtering.
         int cycleCount = -1;
         int prevCycleCount = -1;
 
@@ -2710,24 +2923,44 @@ void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef b
 
         // If previous NCCP is not available and cycle count is <= kTrueNCCCycleCountThreshold, consider this
         // as new battery and set NCCP to kInitialNominalCapacityPercentage, unless we're calibrating
-        if (prevNccp == -1) {
+        if (prevMaxCap == -1) {
             if (cycleCount <= kTrueNCCCycleCountThreshold && !currentlyCalibrating) {
                 nccp = kInitialNominalCapacityPercentage;
             }
-            prevNccp = nccp;
+            prevMaxCap = nccp;
             INFO_LOG("Previous NCCP data not available. Reset to %d. Cycle Count: %d\n", nccp, cycleCount);
         }
 
-
-        // NCCP can only decrease from previous value.
-        // NCCP can be reduced by utmost kNCCChangeLimit after cycle count has gone up by kNCCMinCycleCountChange.
-        if ((cycleCount - prevCycleCount >= kNCCMinCycleCountChange) && (prevNccp - nccp >= kNCCChangeLimit)) {
-            nccp = prevNccp - kNCCChangeLimit;
+        if (isReadyFreezeMaximumCapacity(svcFlags)) {
+            /**
+             * keep the value frozen in kiosk mode as well as qmax unknown mode. This is done to not lose track of the MC% value before entering kiosk mode.
+             * This value later will be used in unfreeze logic to maintain monotonicity. If we don't freeze the MC all along, we will have to find another
+             * place to store the MC snapshot from before entering kiosk mode as a separate state, so simplifying and keeping the MC forzen.
+             * NCC behaves as is and will be captured accurately in telemetry. The UI flow will not change either as when qmax is unknown, the ui will not
+             * show the MC number anyways and while in kiosk mode, the ui has to show the frozen MC as POR. so i don't think this strategy breaks anything.
+            */
+            nccp = prevMaxCap;
+            INFO_LOG("Changing NCCP from %d -> %d (freeze), cycle count change(%d->%d). NCC:%d DesignCap:%d\n",
+                    prevMaxCap, nccp, prevCycleCount, cycleCount, ncc, designCap);
+        } else if (isReadyUnFreezeMaximumCapacity(&prevSvcFlags, svcFlags)) {
+            /**
+             * Don't float MC% beyond its previous snapshot (before entering kiosk mode), this is unfreeze, not reset.
+             * We will always maintain monotonicity when displaying a number, especially in the case there was as service condition before entering kiosk mode
+             * and that too right at the edge of 80%. The only place we break monotonicity is in recalibration (on iPhones and watches). A recalibration use
+             * case is different from 'unknown' use case. monotonic behavior should stay as is in the unknown case.
+            */
+            nccp = nccp > prevMaxCap ? prevMaxCap : nccp;
+            INFO_LOG("Changing NCCP from %d -> %d (reset), cycle count change(%d->%d). NCC:%d DesignCap:%d\n",
+                    prevMaxCap, nccp, prevCycleCount, cycleCount, ncc, designCap);
+        } else if ((cycleCount - prevCycleCount >= kNCCMinCycleCountChange) && (prevMaxCap - nccp >= kNCCChangeLimit)) {
+            // NCCP can only decrease from previous value.
+            // NCCP can be reduced by utmost kNCCChangeLimit after cycle count has gone up by kNCCMinCycleCountChange.
+            nccp = prevMaxCap - kNCCChangeLimit;
             INFO_LOG("Changing NCCP from %d -> %d after cycle count change(%d->%d). NCC:%d DesignCap:%d\n",
-                    prevNccp, nccp, prevCycleCount, cycleCount, ncc, designCap);
+                    prevMaxCap, nccp, prevCycleCount, cycleCount, ncc, designCap);
         }
         else {
-            nccp = prevNccp;
+            nccp = prevMaxCap;
             cycleCount = prevCycleCount;
         }
 
@@ -2743,24 +2976,25 @@ void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef b
         CFDictionaryRemoveValue(bhData, CFSTR(kIOPMPSCycleCountKey));
         removeKeyFromBatteryHealthDataPrefs(CFSTR(kIOPMPSCycleCountKey));
 
-        if (prevNccp == -1) {
-            prevNccp = nccp;
+        if (prevMaxCap == -1) {
+            prevMaxCap = nccp;
             nccpUpdate_ts = currentTime;
             INFO_LOG("Previous NCCP data not available. Reset to %d.\n", nccp);
         }
 
         // NCCP can be updated only once every 24hrs.
         // NCCP can only decrease from previous value
-        if ((prevNccp <= nccp) || (timeDelta < battReadTimeDelta))  {
-            DEBUG_LOG("Using previous NCCP value %d\n", prevNccp);
-            nccp = prevNccp;
+        if ((prevMaxCap <= nccp) || (timeDelta < battReadTimeDelta))  {
+            DEBUG_LOG("Using previous NCCP value %d\n", prevMaxCap);
+            nccp = prevMaxCap;
         }
         else {
-            INFO_LOG("Changing NCCP from %d -> %d after %llu secs. NCC:%d DesignCap:%d\n", prevNccp, nccp, timeDelta, ncc, designCap);
+            INFO_LOG("Changing NCCP from %d -> %d after %llu secs. NCC:%d DesignCap:%d\n", prevMaxCap, nccp, timeDelta, ncc, designCap);
             nccpUpdate_ts = currentTime;
         }
     }
 
+out:
     if (nccp < kNominalCapacityPercentageThreshold) {
         *svcFlags |= kBHSvcFlagNCC;
         INFO_LOG("Nominal Capacity percentage(%d) is less than the threshold(%d)\n", nccp, kNominalCapacityPercentageThreshold);
@@ -2821,6 +3055,11 @@ TARGET_OS_XR_UNUSED STATIC void checkWeightedRa(CFDictionaryRef batteryProps, IO
     uint64_t currentTime = getMonotonicContinuousTime();
     uint64_t timeDelta = currentTime - wraUpdate_ts;
 
+    if (!isSupportedBatteryHealthServiceStateWra()) {
+        return;
+    }
+
+    // check wRa based service in the following steps
     if (batteryHealthP0Threshold == 0) {
         ERROR_LOG("Battery P0 threshold is not set\n");
         *svcFlags |= kBHSvcFlagWRaNotDet;
@@ -2831,9 +3070,16 @@ TARGET_OS_XR_UNUSED STATIC void checkWeightedRa(CFDictionaryRef batteryProps, IO
         // P0 thresholds, but device has unknown chemId.
         ERROR_LOG("Failed to get Battery health P0 threshold value\n");
         *svcFlags |= kBHSvcFlagChemIDNotDet;
+        return;
     }
-    else {
-        if ((weightedRa <= 0) || (timeDelta >= battReadTimeDelta)) {
+
+    // read/update wRa value from provider 
+    if ((weightedRa <= 0) || (timeDelta >= battReadTimeDelta)) {
+        NSDictionary *trustedBatteryHealth = batteryTrustedDataGetTrustedData();
+        if (MGIsiPhone() && trustedBatteryHealth != NULL && trustedBatteryHealth[@kIOPSTrustedDataEnabled] && [trustedBatteryHealth[@kIOPSTrustedDataEnabled] intValue] != 0) {
+            weightedRa = [trustedBatteryHealth[@kIOPSTrustedLifetimeMaxWRdc] intValue];
+            DEBUG_LOG("Using updated wRA %d from trusted battery data after %llu secs\n", weightedRa, timeDelta);
+        } else {
             weightedRa = -1; // Reset to -1 to avoid re-using previous value
             batteryData = CFDictionaryGetValue(batteryProps, CFSTR("BatteryData"));
             NSNumber *wRa = getWeightedRa((__bridge NSDictionary *)batteryData);
@@ -2841,26 +3087,33 @@ TARGET_OS_XR_UNUSED STATIC void checkWeightedRa(CFDictionaryRef batteryProps, IO
                 weightedRa = [wRa intValue];
             }
             DEBUG_LOG("Using updated wRA %d from battery properties after %llu secs\n", weightedRa, timeDelta);
-            wraUpdate_ts = currentTime;
         }
-        else {
-            DEBUG_LOG("Using previous wRA %d\n", weightedRa);
-        }
+        wraUpdate_ts = currentTime;
+    }
+    else {
+        DEBUG_LOG("Using previous wRA %d\n", weightedRa);
+    }
 
-        if (weightedRa <= 0) {
-            ERROR_LOG("Failed to read battery weightedRa\n");
-            *svcFlags |= kBHSvcFlagWRaNotDet;
-        }
-        else if (weightedRa >= batteryHealthP0Threshold) {
-            *svcFlags |= kBHSvcFlagWRa;
-            INFO_LOG("WeightedRa(%d) is >= threshold(%llu)\n", weightedRa, batteryHealthP0Threshold);
-        }
+    if (weightedRa <= 0) {
+        ERROR_LOG("Failed to read battery weightedRa\n");
+        *svcFlags |= kBHSvcFlagWRaNotDet;
+        return;
+    }
+
+    if (weightedRa >= batteryHealthP0Threshold) {
+        *svcFlags |= kBHSvcFlagWRa;
+        INFO_LOG("WeightedRa(%d) is >= threshold(%llu)\n", weightedRa, batteryHealthP0Threshold);
+        return;
     }
 }
 
 TARGET_OS_XR_UNUSED STATIC void checkCellDisconnectCount(CFDictionaryRef batteryProps, IOPSBatteryHealthServiceFlags *svcFlags)
 {
     int bcdc = -1;
+
+    if (!isSupportedBatteryHealthServiceStateBCDC()) {
+        return;
+    }
 
     if (!smcBasedDevice) {
         // Cell disconnect count property is set only on SMC based devices.
@@ -2876,19 +3129,6 @@ TARGET_OS_XR_UNUSED STATIC void checkCellDisconnectCount(CFDictionaryRef battery
         *svcFlags |= kBHSvcFlagBCDC;
         INFO_LOG("BCDC(%d) is greater than the threshold(%d)\n", bcdc, kBatteryCellDisconnectThreshold);
     }
-}
-
-TARGET_OS_XR_UNUSED STATIC void checkBatteryAuthState(IOPSBatteryHealthServiceFlags *svcFlags)
-{
-    batteryAuthState authState = getBatteryAuthState();
-    *svcFlags &= ~(kBHSvcFlagAuthFailure | kBHSvcFlagAuthNotDet); // re-evaluate auth flags everytime, in case the state transitions from unknown->UnTrusted|Trusted.
-    if (authState == kBatteryAuthStateUnTrusted) {
-        *svcFlags |= kBHSvcFlagAuthFailure;
-    }
-    if (authState == kBatteryAuthStateUnknown) {
-        *svcFlags |= kBHSvcFlagAuthNotDet;
-    }
-    DEBUG_LOG("battery auth state: %d flags: 0x%x", authState, *svcFlags);
 }
 
 STATIC void _setBatteryHealthData(
@@ -2916,6 +3156,20 @@ STATIC void _setBatteryHealthData(
         ERROR_LOG("Unable to get previous battery health state. Service Flags:0x%x Service State:%d\n",
                 svcFlags, svcState);
 
+        return;
+    }
+
+    /**
+     * Check for Auth related flags. If set, bail early. This should be typically done right after copyBatteryHealthData()
+     */
+    NSDictionary *bhDict = (__bridge NSDictionary *) bhData;
+    if ([bhDict[@kIOPSBatteryHealthServiceFlagsKey] intValue] & (kBHSvcFlagAuthNotDet | kBHSvcFlagAuthFailure)) {
+        NSMutableDictionary *outDataNs = (__bridge NSMutableDictionary *) outDict;
+        outDataNs[@kIOPSBatteryHealthServiceStateKey] = bhDict[@kIOPSBatteryHealthServiceStateKey];
+        outDataNs[@kIOPSBatteryHealthServiceFlagsKey] = bhDict[@kIOPSBatteryHealthServiceFlagsKey];
+        outDataNs[@kIOPSBatteryHealthMaxCapacityPercent] = bhDict[@kIOPSBatteryHealthMaxCapacityPercent];
+        DEBUG_LOG("Skipping battery health loop due to missing auth [0x%x]", svcFlags);
+        CFRelease(bhData);
         return;
     }
 
@@ -2985,7 +3239,6 @@ STATIC void _setBatteryHealthData(
     checkUPOCount(&svcFlags);
     checkWeightedRa(batteryProps, &svcFlags);
     checkCellDisconnectCount(batteryProps, &svcFlags);
-    checkBatteryAuthState(&svcFlags);
 
     updateBatteryServiceState(batteryProps, bhData, svcFlags);
     saveBatteryHealthDataToPrefs(bhData);
@@ -4109,6 +4362,7 @@ bool isFullyCharged(IOPMBattery *b)
 
 
 
+
 /*
  * Implicit argument: All the global variables that track battery state
  */
@@ -4816,6 +5070,8 @@ static void envelopeBatteryInformation(NSMutableDictionary *batteryData)
 
     capacity = [refCapacity intValue];
     capacity = ROUND_TO_MULTIPLE_OF_5(capacity);
+    capacity = MAX(1, capacity);
+    capacity = MIN(100, capacity);
     batteryData[@kIOPSCurrentCapacityKey] = [NSNumber numberWithInt:capacity];
 }
 #endif
@@ -4830,7 +5086,7 @@ static NSArray *copy_powersources_info(audit_token_t token, int type, bool preci
         if (gPSList[i].description == NULL) {
             continue;
         }
-
+        
         switch(type) {
         case kIOPSSourceInternal:
             if (gPSList[i].psType != kPSTypeIntBattery)

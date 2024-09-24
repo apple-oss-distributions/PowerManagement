@@ -85,6 +85,7 @@ os_log_t    assertions_log = NULL;
  */
 #define kPMAssertionTimeoutOnResumeKey CFSTR("_AssertTimeoutOnResume")
 
+#define kPMAssertionIsRunningboardd CFSTR("_IsRunningboardd")
 
 
 // CAST_PID_TO_KEY casts a mach_port_t into a void * for CF containers
@@ -92,7 +93,7 @@ os_log_t    assertions_log = NULL;
 
 #define LEVEL_FOR_BIT(idx)          (getAssertionLevel(idx))
 
-
+#define USE_LEGACY_SYSTEM_IS_ACTIVE 0
 
 /*
  * Maximum delay allowed(in Mins) for turning off the display after the
@@ -115,6 +116,7 @@ CFDictionaryRef copyRepeatPowerEvents(void);
 
 static void                         sendSmartBatteryCommand(uint32_t which, uint32_t level);
 static void                         sendUserAssertionsToKernel(uint32_t user_assertions);
+static bool                         sendIdleSleepRevertReqestToKernel(void);
 static void                         evaluateForPSChange(void);
 static void                         evaluateProcTimerOnDisplayStateChange(bool displayAsleepOnTrigger);
 static void                         HandleProcessExit(pid_t deadPID);
@@ -201,7 +203,7 @@ static int                          gPendingResponseTimeout = 5;
 static uint32_t                     gSleepBlockers = 0;
 
 static CFMutableSetRef              gPendingLoggingResponses = NULL;
-static bool                         gActivityUpdateInProgress = false;
+static uint32_t                     gActivityUpdateToken = 0;
 static CFMutableDictionaryRef       gAsyncActiveAssertions = NULL;
 static bool                         gActivityUpdateActivesOnly = false;
 static bool                         gActivityUpdateClientOverflow = false;
@@ -811,25 +813,37 @@ void sendAssertionActivityUpdateMsg(ProcessInfo *pinfo, bool actives_only, void(
     } else {
         xpc_dictionary_set_uint64(msg, kAssertionUpdateActivityMsg, 1);
     }
+    xpc_dictionary_set_uint64(msg, kAssertionCheckTokenKey, gActivityUpdateToken);
+    DEBUG_LOG("sendAssertionActivityUpdateMsg: Sending token: %u to pid: %d\n", gActivityUpdateToken, pinfo->pid);
     xpc_connection_send_message_with_reply(pinfo->remoteConnection, msg, _getPMMainQueue(), responseHandler);
     xpc_release(msg);
 }
 
 void processAssertionActivityUpdateResp(xpc_object_t reply, pid_t pid, bool actives_only)
 {
-    if (gActivityUpdateInProgress == false) {
-        ERROR_LOG("processAssertionActivityUpdateResp: client %d responded after timeout", pid);
+    uint32_t    token = 0;
+
+    xpc_type_t type = xpc_get_type(reply);
+    if (type != XPC_TYPE_DICTIONARY) {
+        ERROR_LOG("processAssertionActivityUpdateResp: Reply type isn't XPC_TYPE_DICTIONARY from pid: %d\n", pid);
+        return;
+    }
+
+    token = (uint32_t)xpc_dictionary_get_uint64(reply, kAssertionCheckTokenKey);
+    if (token != gActivityUpdateToken) {
+        if (gActivityUpdateToken == 0) {
+            ERROR_LOG("processAssertionActivityUpdateResp: client %d responded after timeout", pid);
+        }
+        else {
+            ERROR_LOG("processAssertionActivityUpdateResp: Unexpected response from pid %d. token: %u expected: %u\n",
+                      pid, token, gActivityUpdateToken);
+        }
         return;
     }
 
     ProcessInfo *pinfo = processInfoGet(pid);
     if (!pinfo) {
         ERROR_LOG("Process for pid %d not found", pid);
-        return;
-    }
-    
-    if (!CFSetContainsValue(gPendingLoggingResponses, pinfo)) {
-        INFO_LOG("Reply from pid:%d not considered pending. Reply likely from a previous request.\n", pid);
         return;
     }
     
@@ -866,13 +880,25 @@ void processAssertionActivityUpdateResp(xpc_object_t reply, pid_t pid, bool acti
         } else {
             _sendAssertionActivityUpdate(NULL, gActivityUpdateClientOverflow);
         }
-        gActivityUpdateInProgress = false;
+        gActivityUpdateToken = 0;
     }
 }
 
 bool assertionActivityUpdateInProgress(void)
 {
-    return gActivityUpdateInProgress;
+    return (gActivityUpdateToken != 0);
+}
+
+// Generates monotonically increasing tokens from (1 to (2^32)-1). 0 is reserved to indicate NULL.
+uint32_t generateAssertionActivityUpdateToken(void)
+{
+    static uint32_t lastToken = 0;
+
+    if (lastToken == UINT32_MAX)
+        lastToken = 0;
+
+    lastToken += 1;
+    return lastToken;
 }
 
 void checkForAssertionActivityUpdates(bool actives_only)
@@ -889,7 +915,8 @@ void checkForAssertionActivityUpdates(bool actives_only)
     if (actives_only) {
         gAsyncActiveAssertions = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     }
-    gActivityUpdateInProgress = true;
+
+    gActivityUpdateToken = generateAssertionActivityUpdateToken();
 
     if (gPendingLoggingResponses == NULL) {
         gPendingLoggingResponses = CFSetCreateMutable(0, 0, NULL);
@@ -900,7 +927,7 @@ void checkForAssertionActivityUpdates(bool actives_only)
             } else {
                 _sendAssertionActivityUpdate(NULL, false);
             }
-            gActivityUpdateInProgress = false;
+            gActivityUpdateToken = 0;
             goto exit;
         }
     }
@@ -914,7 +941,7 @@ void checkForAssertionActivityUpdates(bool actives_only)
         } else {
             _sendAssertionActivityUpdate(NULL, false);
         }
-        gActivityUpdateInProgress = false;
+        gActivityUpdateToken = 0;
         goto exit;
     }
     CFDictionaryGetKeysAndValues(gProcessDict, NULL, (const void **)procs);
@@ -927,8 +954,8 @@ void checkForAssertionActivityUpdates(bool actives_only)
         processInfoRetain(pinfo->pid);
         CFSetAddValue(gPendingLoggingResponses, (const void*)pinfo);
         pid_t pid = pinfo->pid;
-        sendAssertionActivityUpdateMsg(pinfo, actives_only, ^(xpc_object_t reply) {
-            processAssertionActivityUpdateResp(reply, pid, actives_only);
+        sendAssertionActivityUpdateMsg(pinfo, gActivityUpdateActivesOnly, ^(xpc_object_t reply) {
+            processAssertionActivityUpdateResp(reply, pid, gActivityUpdateActivesOnly);
         });
     }
 
@@ -940,7 +967,7 @@ void checkForAssertionActivityUpdates(bool actives_only)
         } else {
             _sendAssertionActivityUpdate(NULL, false);
         }
-        gActivityUpdateInProgress = false;
+        gActivityUpdateToken = 0;
         goto exit;
     }
     if (timer == 0) {
@@ -978,7 +1005,7 @@ void checkForAssertionActivityUpdates(bool actives_only)
             if (timedOutProcesses) {
                 CFRelease(timedOutProcesses);
             }
-            gActivityUpdateInProgress = false;
+            gActivityUpdateToken = 0;
             CFSetRemoveAllValues(gPendingLoggingResponses);
         });
 
@@ -1105,6 +1132,10 @@ kern_return_t _io_pm_assertion_create (
         ERROR_LOG("_io_pm_assertion_create: Assertion requires root but PID %d isn't", callerPID);
         *return_code = kIOReturnNotPrivileged;
         goto exit;
+    }
+
+    if (auditTokenIsRunningboardd(token)) {
+        CFDictionarySetValue(newAssertionProperties, kPMAssertionIsRunningboardd, kCFBooleanTrue);
     }
 
     *return_code = doCreate(callerPID, newAssertionProperties, (IOPMAssertionID *)assertion_id, &pinfo, enTrIntensity);
@@ -1602,6 +1633,47 @@ static void sendUserAssertionsToKernel(uint32_t user_assertions)
                         NULL, NULL, NULL);
 
     return;
+}
+
+
+// Attempt to queue an idle sleep revert with PMRD.
+// Returns true if PMRD responds that sleep revert is possible.
+static bool sendIdleSleepRevertReqestToKernel(void)
+{
+    io_connect_t        connect = IO_OBJECT_NULL;
+    IOReturn            ret;
+    uint32_t            outputScalarCnt = 1;
+    size_t              outputStructSize = 0;
+    uint64_t            outs[1];
+    bool                sleepReverted = false;
+
+
+    if ( (connect = getRootDomainConnect()) == IO_OBJECT_NULL) {
+        return false;
+    }
+
+    ret = IOConnectCallMethod(
+                              connect,                   // connect
+                              kPMRequestIdleSleepRevert,  // selector
+                              NULL,                   // input
+                              0,                      // input count
+                              NULL,                   // input struct
+                              0,                      // input struct count
+                              outs,                   // output scalar
+                              &outputScalarCnt,       // output scalar count
+                              NULL,                   // output struct
+                              &outputStructSize);     // output struct size
+
+    if (kIOReturnSuccess != ret) {
+        ERROR_LOG("IdleSleepRevert request queueing failed. rc:0x%x", ret);
+        return false;
+    }
+    else {
+        sleepReverted = outs[0];
+        DEBUG_LOG("IdleSleepRevertRequest Successful: %s", sleepReverted ? "true" : "false");
+        return sleepReverted;
+    }
+    return sleepReverted;
 }
 
 #pragma mark -
@@ -3146,7 +3218,7 @@ void schedDisableAppSleep(assertion_t *assertion)
 
     assertType = &gAssertionTypes[assertion->kassert]; 
 
-    if ( !(assertType->flags & kAssertionTypePreventAppSleep)) return;
+    if ( !(assertType->flags & kAssertionTypePreventAppSleep) || assertion->runningboard) return;
 
     pinfo = assertion->pinfo;
     if (assertion->causingPid && assertion->causingPinfo) {
@@ -3180,7 +3252,7 @@ void schedEnableAppSleep(assertion_t *assertion)
     ProcessInfo         *pinfo = NULL;
 
     assertType = &gAssertionTypes[assertion->kassert]; 
-    if ( !(assertType->flags & kAssertionTypePreventAppSleep)) return;
+    if ( !(assertType->flags & kAssertionTypePreventAppSleep) || assertion->runningboard) return;
 
     pinfo = assertion->pinfo;
     if (assertion->causingPid && assertion->causingPinfo) {
@@ -3326,6 +3398,8 @@ kern_return_t _io_pm_change_sa_assertion_behavior (
 exit:
     return KERN_SUCCESS;
 }
+
+#if USE_LEGACY_SYSTEM_IS_ACTIVE
 kern_return_t _io_pm_declare_system_active (
                                             mach_port_t             server  __unused,
                                             audit_token_t           token,
@@ -3403,6 +3477,71 @@ exit:
 
     return KERN_SUCCESS;
 }
+#else
+kern_return_t _io_pm_declare_system_active (
+                                            mach_port_t             server  __unused,
+                                            audit_token_t           token,
+                                            int                     *system_state,
+                                            vm_offset_t             props,
+                                            mach_msg_type_number_t  propsCnt,
+                                            int                     *assertion_id,
+                                            int                     *return_code)
+{
+    pid_t                   callerPID = -1;
+    CFDataRef               unfolder  = NULL;
+    CFMutableDictionaryRef  assertionProperties = NULL;
+
+    audit_token_to_au32(token, NULL, NULL, NULL, NULL, NULL, &callerPID, NULL, NULL);
+
+    *assertion_id = 0;
+    unfolder = CFDataCreateWithBytesNoCopy(0, (const UInt8 *)props, propsCnt, kCFAllocatorNull);
+    if (unfolder) {
+        assertionProperties = (CFMutableDictionaryRef)CFPropertyListCreateWithData
+                                    (0, unfolder, kCFPropertyListMutableContainers, NULL, NULL);
+        CFRelease(unfolder);
+    }
+
+    if (!assertionProperties) {
+        *return_code = kIOReturnBadArgument;
+        goto exit;
+    }
+
+    if (!callerIsEntitledToAssertion(token, assertionProperties))
+    {
+        *return_code = kIOReturnNotPrivileged;
+        goto exit;
+    }
+    *system_state = kIOPMSystemSleepNotReverted;
+    *return_code = kIOReturnSuccess;
+
+    // If set via a backdoor in pmset, this makes
+    // IOPMAssertionDeclareSystemActivity() behave identically to a
+    // PreventUserIdleSystemSleep assertion. It negates the side-effect
+    // behaviors associated with the call
+    if(gSAAssertionBehaviorFlags != kIOPMSystemActivityAssertionEnabled)
+        CFDictionarySetValue(assertionProperties, kIOPMAssertionTypeKey, kIOPMAssertionTypePreventUserIdleSystemSleep);
+    else {
+        CFDictionarySetValue(assertionProperties, kIOPMAssertionTypeKey, kIOPMAssertionTypeSystemIsActive);
+        bool revertible = sendIdleSleepRevertReqestToKernel();
+        if(revertible) {
+            *system_state = kIOPMSystemSleepReverted;
+        }
+        INFO_LOG("Sleep revert state: %d\n", revertible);
+    }
+
+    if(kIOReturnSuccess != doCreate(callerPID, assertionProperties, (IOPMAssertionID *)assertion_id, NULL, NULL))
+        *return_code = kIOReturnInternalError;
+
+exit:
+
+    if (assertionProperties)
+        CFRelease(assertionProperties);
+
+    vm_deallocate(mach_task_self(), props, propsCnt);
+
+    return KERN_SUCCESS;
+}
+#endif
 
 kern_return_t  _io_pm_declare_user_active (   
                                            mach_port_t             server  __unused,
@@ -5853,6 +5992,7 @@ STATIC IOReturn doCreate(
     CFRetain(newProperties);
     assertion->retainCnt = 1;
     assertion->pinfo = pinfo;
+    assertion->runningboard = CFDictionaryContainsKey(newProperties, kPMAssertionIsRunningboardd);
 
     // create pinfo for caused by pid
     if (assertion->causingPid) {

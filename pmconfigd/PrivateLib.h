@@ -115,6 +115,10 @@
 #define USBDEVICEMODE_LOG           "usbdevicemode"
 #define BATTERY_AUTH_LOG            "batteryAuth"
 #define WAKE_PERF_LOG               "wakePerfLog"
+#define BATTERY_CAPACITY_MONITOR_LOG    "batteryCapacityMonitor"
+#define SLEEPWAKE_RESOURCE_LOG      "sleepWakeResource"
+#define BATTERY_GAUGING_LOG         "batterygauging"
+#define BATTERY_TRUSTED_DATA_LOG    "batteryTrustedData"
 
 #ifndef LOG_STREAM
 #define LOG_STREAM OS_LOG_DEFAULT
@@ -267,7 +271,6 @@ struct IOPMBattery {
     int                     cycleCount;
     int                     location;
     int                     hwAverageTR;
-    int                     hwInstantTR;
     int                     swCalculatedTR;
     int                     swCalculatedPR;
     int                     invalidWakeSecs;
@@ -365,6 +368,11 @@ enum {
 #define kThermalStateNoRequest  0
 #define kThermalStateCount      (4)
 
+typedef enum {
+    kSilentRunningSupportTypeNone = 0,
+    kSilentRunningSupportTypeLegacy = 1, // Through the `WKTP` SMC Key
+    kSilentRunningSupportTypeModern = 2 // Through the `zEPD` SMC Key
+} SR_SMCSupportType;
 
 static bool                     _platformBackgroundTaskSupport = false;
 static bool                     _platformSleepServiceSupport = false;
@@ -510,6 +518,7 @@ __private_extern__ CFUserNotificationRef _copyUPSWarning(void);
 __private_extern__ IOReturn              _smcWakeTimerPrimer(void);
 __private_extern__ IOReturn              _smcWakeTimerGetResults(double *mSec);
 __private_extern__ bool                  smcSilentRunningSupport(void);
+__private_extern__ SR_SMCSupportType     smcSilentRunningSupportType(void);
 
 __private_extern__ void                 _askNicelyThenShutdownSystem(void);
 __private_extern__ void                 _askNicelyThenRestartSystem(void);
@@ -550,6 +559,7 @@ __private_extern__ bool auditTokenHasEntitlement(
                                                  CFStringRef entitlement);
 __private_extern__ bool xpcConnectionHasEntitlement(xpc_object_t connection,
                                                     CFStringRef entitlement);
+__private_extern__ bool auditTokenIsRunningboardd(audit_token_t token);
 
 __private_extern__ void                 _oneOffHacksSetup(void);
 
