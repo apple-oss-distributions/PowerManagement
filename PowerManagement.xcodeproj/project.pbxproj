@@ -138,7 +138,7 @@
 		119B32461E41506100EB0780 /* PMAssertionLog.c in Sources */ = {isa = PBXBuildFile; fileRef = 220D605F1828511000E98262 /* PMAssertionLog.c */; };
 		119B32471E41506400EB0780 /* PMAssertions.c in Sources */ = {isa = PBXBuildFile; fileRef = 723A24E31082B88500E3CB92 /* PMAssertions.c */; };
 		119B32481E41506900EB0780 /* PMSystemEvents.c in Sources */ = {isa = PBXBuildFile; fileRef = 72A9DF010CDAA05B000FDB18 /* PMSystemEvents.c */; };
-		119B32491E41506D00EB0780 /* PMSettings.c in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF4031ECBBC0ACA28D7 /* PMSettings.c */; };
+		119B32491E41506D00EB0780 /* PMSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF4031ECBBC0ACA28D7 /* PMSettings.m */; };
 		119B324A1E41507000EB0780 /* UPSLowPower.c in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF6031ECBBC0ACA28D7 /* UPSLowPower.c */; };
 		119B324B1E41507400EB0780 /* SystemLoad.c in Sources */ = {isa = PBXBuildFile; fileRef = 72DC9D6B0E1D98210066B287 /* SystemLoad.c */; };
 		119B324C1E41507900EB0780 /* PMStore.c in Sources */ = {isa = PBXBuildFile; fileRef = 7221FC8E12DFEDEC00C69087 /* PMStore.c */; };
@@ -276,7 +276,7 @@
 		4878DC641E77686900CF1891 /* PMAssertionLog.c in Sources */ = {isa = PBXBuildFile; fileRef = 220D605F1828511000E98262 /* PMAssertionLog.c */; };
 		4878DC651E77686900CF1891 /* PMAssertions.c in Sources */ = {isa = PBXBuildFile; fileRef = 723A24E31082B88500E3CB92 /* PMAssertions.c */; };
 		4878DC661E77686900CF1891 /* PMSystemEvents.c in Sources */ = {isa = PBXBuildFile; fileRef = 72A9DF010CDAA05B000FDB18 /* PMSystemEvents.c */; };
-		4878DC671E77686900CF1891 /* PMSettings.c in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF4031ECBBC0ACA28D7 /* PMSettings.c */; };
+		4878DC671E77686900CF1891 /* PMSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF4031ECBBC0ACA28D7 /* PMSettings.m */; };
 		4878DC681E77686900CF1891 /* UPSLowPower.c in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF6031ECBBC0ACA28D7 /* UPSLowPower.c */; };
 		4878DC691E77686900CF1891 /* SystemLoad.c in Sources */ = {isa = PBXBuildFile; fileRef = 72DC9D6B0E1D98210066B287 /* SystemLoad.c */; };
 		4878DC6A1E77686900CF1891 /* StandbyTimer.c in Sources */ = {isa = PBXBuildFile; fileRef = 489585BC1E42231300DAD9E9 /* StandbyTimer.c */; };
@@ -319,7 +319,7 @@
 		48A48D671EF42F8F0016FE7B /* PMAssertionLog.c in Sources */ = {isa = PBXBuildFile; fileRef = 220D605F1828511000E98262 /* PMAssertionLog.c */; };
 		48A48D681EF42F8F0016FE7B /* PMAssertions.c in Sources */ = {isa = PBXBuildFile; fileRef = 723A24E31082B88500E3CB92 /* PMAssertions.c */; };
 		48A48D691EF42F8F0016FE7B /* PMSystemEvents.c in Sources */ = {isa = PBXBuildFile; fileRef = 72A9DF010CDAA05B000FDB18 /* PMSystemEvents.c */; };
-		48A48D6A1EF42F8F0016FE7B /* PMSettings.c in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF4031ECBBC0ACA28D7 /* PMSettings.c */; };
+		48A48D6A1EF42F8F0016FE7B /* PMSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = 40BE9CF4031ECBBC0ACA28D7 /* PMSettings.m */; };
 		48A48D6C1EF42F8F0016FE7B /* SystemLoad.c in Sources */ = {isa = PBXBuildFile; fileRef = 72DC9D6B0E1D98210066B287 /* SystemLoad.c */; };
 		48A48D6E1EF42F8F0016FE7B /* PMStore.c in Sources */ = {isa = PBXBuildFile; fileRef = 7221FC8E12DFEDEC00C69087 /* PMStore.c */; };
 		48A48D6F1EF42F8F0016FE7B /* PrivateLib.c in Sources */ = {isa = PBXBuildFile; fileRef = A9FD4B72047C482B00FA82A6 /* PrivateLib.c */; };
@@ -420,7 +420,7 @@
 		72A1C140128E0AD700754139 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 40882BA8019747120ACA2928 /* SystemConfiguration.framework */; };
 		72A694E618EA2D4400D5D682 /* iopmruntests.py in CopyFiles */ = {isa = PBXBuildFile; fileRef = 72A694E418EA2CD500D5D682 /* iopmruntests.py */; };
 		72B108E7293FCF7500B0403B /* _PMCoreSmartPowerNapProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 72B108E6293FCF7500B0403B /* _PMCoreSmartPowerNapProtocol.h */; settings = {ATTRIBUTES = (Public, ); }; };
-		72B7807C2673288C0037CE23 /* DataMigration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 72B7807B2673288C0037CE23 /* DataMigration.framework */; platformFilters = (ios, xros, ); settings = {ATTRIBUTES = (Weak, ); }; };
+		72B7807C2673288C0037CE23 /* DataMigration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 72B7807B2673288C0037CE23 /* DataMigration.framework */; platformFilters = (ios, xros, watchos, ); settings = {ATTRIBUTES = (Weak, ); }; };
 		72D0ECFF08F73FB600CCEA2F /* AppleSmartBattery.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 72D0ECF908F73FB600CCEA2F /* AppleSmartBattery.cpp */; };
 		72D0ED0008F73FB600CCEA2F /* AppleSmartBatteryManager.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 72D0ECFC08F73FB600CCEA2F /* AppleSmartBatteryManager.cpp */; };
 		72D2324129A6F23F00B3A1AF /* _PMCoreSmartPowerNapProtocol.h in Headers */ = {isa = PBXBuildFile; fileRef = 72B108E6293FCF7500B0403B /* _PMCoreSmartPowerNapProtocol.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -442,6 +442,7 @@
 		72DCDE4C29A8360F00666DB6 /* PMCoreSmartPowerNapLocationMonitor.m in Sources */ = {isa = PBXBuildFile; fileRef = 7297A8B0293FE0BF008B9D8E /* PMCoreSmartPowerNapLocationMonitor.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		72DCDE4D29A8381F00666DB6 /* BiomeStreams.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B30EE97027BDC53E00CE2DD6 /* BiomeStreams.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
 		72DCDE4E29A8382A00666DB6 /* BiomeLibrary.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B30EE97227BDC63500CE2DD6 /* BiomeLibrary.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+		72ACDC1B2D1228A600C696AD /* PowerExperience.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 72ACDC1A2D1228A600C696AD /* PowerExperience.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
 		72DCDE4F29A83C9600666DB6 /* LowPowerMode.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 804E7F5B2447E017001FA751 /* LowPowerMode.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
 		72EA6D1718EA2DE100FCE94F /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 72CEF7E118C16D5400E7B3B4 /* CoreFoundation.framework */; };
 		72EA6D2418EA303700FCE94F /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 72CEF7E318C16D5B00E7B3B4 /* IOKit.framework */; };
@@ -893,7 +894,7 @@
 		};
 		11DA8BED1E84C24000664706 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -922,7 +923,7 @@
 		};
 		1955B423279F38AB00C8FA37 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -931,7 +932,7 @@
 		};
 		19A52D1626C333A50093874F /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/local/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -971,7 +972,7 @@
 		};
 		4825363221BE427600A4DB1C /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/local/share/man/man1;
 			dstSubfolderSpec = 0;
 			files = (
@@ -981,7 +982,7 @@
 		};
 		48644FB51B7D5B0500AC7C92 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/local/share/man/man1;
 			dstSubfolderSpec = 0;
 			files = (
@@ -991,7 +992,7 @@
 		};
 		4896D8452452222300687BC1 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /System/Library/LaunchDaemons;
 			dstSubfolderSpec = 0;
 			files = (
@@ -1031,7 +1032,7 @@
 		};
 		48D667281C99D6CD0006F1C8 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -1050,7 +1051,7 @@
 		};
 		720BF5E918DD27D5005621D0 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -1069,7 +1070,7 @@
 		};
 		725E685918DED0DA005DA3E7 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -1149,7 +1150,7 @@
 		};
 		72EA6D1418EA2DE100FCE94F /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -1168,7 +1169,7 @@
 		};
 		869B135B270769E800586BE8 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
+			buildActionMask = 8;
 			dstPath = /usr/local/share/man/man1/;
 			dstSubfolderSpec = 0;
 			files = (
@@ -1390,7 +1391,7 @@
 		40882BA8019747120ACA2928 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = /System/Library/Frameworks/SystemConfiguration.framework; sourceTree = "<absolute>"; };
 		40BE9CF2031ECBBC0ACA28D7 /* BatteryTimeRemaining.m */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.objc; path = BatteryTimeRemaining.m; sourceTree = "<group>"; };
 		40BE9CF3031ECBBC0ACA28D7 /* BatteryTimeRemaining.h */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.h; name = BatteryTimeRemaining.h; path = pmconfigd/BatteryTimeRemaining.h; sourceTree = SOURCE_ROOT; };
-		40BE9CF4031ECBBC0ACA28D7 /* PMSettings.c */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.c; name = PMSettings.c; path = pmconfigd/PMSettings.c; sourceTree = SOURCE_ROOT; };
+		40BE9CF4031ECBBC0ACA28D7 /* PMSettings.m */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.objc; name = PMSettings.m; path = pmconfigd/PMSettings.m; sourceTree = SOURCE_ROOT; };
 		40BE9CF5031ECBBC0ACA28D7 /* PMSettings.h */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.h; name = PMSettings.h; path = pmconfigd/PMSettings.h; sourceTree = SOURCE_ROOT; };
 		40BE9CF6031ECBBC0ACA28D7 /* UPSLowPower.c */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.c; name = UPSLowPower.c; path = pmconfigd/UPSLowPower.c; sourceTree = SOURCE_ROOT; };
 		40BE9CF7031ECBBC0ACA28D7 /* UPSLowPower.h */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.h; name = UPSLowPower.h; path = pmconfigd/UPSLowPower.h; sourceTree = SOURCE_ROOT; };
@@ -1577,6 +1578,7 @@
 		803BC92B244A307600BA8263 /* PMLowPowerModeService.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = PMLowPowerModeService.m; sourceTree = "<group>"; };
 		803BC936244E2AFB00BA8263 /* FindMyMac.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FindMyMac.framework; path = System/Library/PrivateFrameworks/FindMyMac.framework; sourceTree = SDKROOT; };
 		803BC938244E3B8F00BA8263 /* FindMyDevice.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FindMyDevice.framework; path = System/Library/PrivateFrameworks/FindMyDevice.framework; sourceTree = SDKROOT; };
+		72ACDC1A2D1228A600C696AD /* PowerExperience.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = PowerExperience.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS19.0.Internal.sdk/System/Library/PrivateFrameworks/PowerExperience.framework; sourceTree = DEVELOPER_DIR; };
 		803BC949244E551900BA8263 /* CoreDuetContext.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreDuetContext.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS14.0.Internal.sdk/System/Library/PrivateFrameworks/CoreDuetContext.framework; sourceTree = DEVELOPER_DIR; };
 		803BC94A244E551900BA8263 /* CoreDuet.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreDuet.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS14.0.Internal.sdk/System/Library/PrivateFrameworks/CoreDuet.framework; sourceTree = DEVELOPER_DIR; };
 		803BC94D244E594200BA8263 /* AggregateDictionary.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AggregateDictionary.framework; path = System/Library/PrivateFrameworks/AggregateDictionary.framework; sourceTree = SDKROOT; };
@@ -1841,6 +1843,7 @@
 				4878DC7E1E7769E200CF1891 /* CoreFoundation.framework in Frameworks */,
 				72DCDE4E29A8382A00666DB6 /* BiomeLibrary.framework in Frameworks */,
 				72DCDE4D29A8381F00666DB6 /* BiomeStreams.framework in Frameworks */,
+				72ACDC1B2D1228A600C696AD /* PowerExperience.framework in Frameworks */,
 				4878DC7C1E7769DC00CF1891 /* SystemConfiguration.framework in Frameworks */,
 				4878DC7A1E7769D000CF1891 /* IOKit.framework in Frameworks */,
 				4878DC781E7769C900CF1891 /* libbsm.dylib in Frameworks */,
@@ -2167,7 +2170,7 @@
 				723A24E41082B88600E3CB92 /* PMAssertions.h */,
 				72A9DF010CDAA05B000FDB18 /* PMSystemEvents.c */,
 				72A9DF020CDAA05B000FDB18 /* PMSystemEvents.h */,
-				40BE9CF4031ECBBC0ACA28D7 /* PMSettings.c */,
+				40BE9CF4031ECBBC0ACA28D7 /* PMSettings.m */,
 				40BE9CF5031ECBBC0ACA28D7 /* PMSettings.h */,
 				40BE9CF6031ECBBC0ACA28D7 /* UPSLowPower.c */,
 				40BE9CF7031ECBBC0ACA28D7 /* UPSLowPower.h */,
@@ -2312,6 +2315,7 @@
 		40882B99019742A20ACA2928 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				1E14A1272CE2FD4D001C0CD3 /* DataMigration.framework */,
 				021C9B012BB0DAD800628F21 /* CoreAccessories.framework */,
 				B34A863A2B72DE7900AD8CF4 /* PowerExperience.framework */,
 				7275EE6E29A984CB0064E857 /* Trial.framework */,
@@ -2350,6 +2354,7 @@
 				B3E63D382405F985009FE961 /* RunningBoardServices.framework */,
 				08196AF723C3FDEB00D48110 /* CPMS.framework */,
 				13B3011D22B9883000FDC1B9 /* SkyLight.framework */,
+				72ACDC1A2D1228A600C696AD /* PowerExperience.framework */,
 				482CA98E22BC1FA10002DC2D /* libIOReport.tbd */,
 				B39F87612228BB91006D4499 /* System.framework */,
 				487BE3FD21B64A790005462B /* libDiagnosticMessagesClient.tbd */,
@@ -3866,7 +3871,7 @@
 				02AB501C2BDDEE3900AC4A24 /* BatteryTrustedData.m in Sources */,
 				119B324B1E41507400EB0780 /* SystemLoad.c in Sources */,
 				119B32411E41504C00EB0780 /* BatteryTimeRemaining.m in Sources */,
-				119B32491E41506D00EB0780 /* PMSettings.c in Sources */,
+				119B32491E41506D00EB0780 /* PMSettings.m in Sources */,
 				119B32401E41504800EB0780 /* AutoWakeScheduler.c in Sources */,
 				119B323F1E41504400EB0780 /* RepeatingAutoWake.c in Sources */,
 				119B32511E4150D500EB0780 /* ioupspluginmig.defs in Sources */,
@@ -4004,7 +4009,7 @@
 				4878DC661E77686900CF1891 /* PMSystemEvents.c in Sources */,
 				1E0F2DF32B4E231D0051EA70 /* BatteryCapacityMonitor.m in Sources */,
 				1ED44A0B25E5B3E30006AE96 /* prefs.m in Sources */,
-				4878DC671E77686900CF1891 /* PMSettings.c in Sources */,
+				4878DC671E77686900CF1891 /* PMSettings.m in Sources */,
 				4878DC681E77686900CF1891 /* UPSLowPower.c in Sources */,
 				4878DC691E77686900CF1891 /* SystemLoad.c in Sources */,
 				4878DC6A1E77686900CF1891 /* StandbyTimer.c in Sources */,
@@ -4066,7 +4071,7 @@
 				48A48D691EF42F8F0016FE7B /* PMSystemEvents.c in Sources */,
 				72352E3C2824800B00AAAFEC /* BatteryCapacityCalibration.m in Sources */,
 				B39C576A2AF2EAFE00E4C033 /* SleepWakeResourceMonitor.m in Sources */,
-				48A48D6A1EF42F8F0016FE7B /* PMSettings.c in Sources */,
+				48A48D6A1EF42F8F0016FE7B /* PMSettings.m in Sources */,
 				73406F832AD70F6800B60F10 /* BatteryGaugingAccuracyManager.m in Sources */,
 				48A48D6C1EF42F8F0016FE7B /* SystemLoad.c in Sources */,
 				48A48D6E1EF42F8F0016FE7B /* PMStore.c in Sources */,

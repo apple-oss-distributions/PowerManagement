@@ -73,6 +73,10 @@
 #include "BatteryCapacityCalibration.h"
 #include "AppleSmartBatteryKeysPrivate.h"
 
+#if __has_include(<DataMigration/DMMessaging.h>)
+#import <DataMigration/DMMessaging.h>
+#endif
+
 #define QUOTIENT_OF_5(soc) (soc/5)
 #define ROUND_TO_MULTIPLE_OF_5(soc) abs((5 * QUOTIENT_OF_5(soc)) - soc) < abs((5 * (QUOTIENT_OF_5(soc)+1)) - soc) ? (5 * QUOTIENT_OF_5(soc)) : (5 * (QUOTIENT_OF_5(soc)+1))
 
@@ -232,14 +236,18 @@ typedef enum: unsigned long {
     kBHCalibrationFlagNoServiceToServiceDuringCalibration =     (1UL << 2),
     kBHCalibrationFlagServiceAtEndOfCalibration =               (1UL << 3),
     kBHCalibrationFlagServiceToNoServiceDuringCalibration =     (1UL << 4),
-    kBHCalibrationFlagCompleted =                               (1UL << 5),
+    kBHCalibrationFlagCompleted =                               (1UL << 5), // used in the same intent as calib0Completed
     kBHCalibrationFlagThresholdLower =                          (1UL << 6),
     kBHCalibrationFlagSkipped =                                 (1UL << 7),
     kBHCalibrationFlagThresholdHigher =                         (1UL << 8), // Do not redefine or move, used by AST2
     kBHCalibrationFlagFailure =                                 (1UL << 9), // Telemetry only, all other systems should use kBHSvcStateCalibrationFailed
     kBHCalibrationFlagCalib1NotNeeded =                         (1UL << 10), // Mark if another round of calibration is not needed
     kBHCalibrationFlagCalib1Completed =                         (1UL << 11), // Mark if second round of calibration is completed
+    kBHCalibrationFlagCalib0Needed =                            (1UL << 12), // Mark if calibration0 is needed
+    kBHCalibrationFlagCalibNccTHSOCNeeded =                     (1UL << 13), // Mark if THSOC fault based ncc calibration is needed (rdar://139609307 (Massive drop in battery capacity (health) in watches running MoonstoneC))
+    kBHCalibrationFlagCalibNccTHSOCCompleted =                  (1UL << 14), // Mark if THSOC fault based ncc calibration is completed
 } kBHCalibrationFlags;
+
 #define kBHCalibrationBaselineKey       "baseline"
 #define kBHCalibrationSnapshotsKey      "snapshots"
 #define kBHCalibrationExitTOTKey        "exitTotalOperatingTime"
@@ -444,7 +452,7 @@ static int rawToNominal(int val, int base)
 int __rawToNominal(int val, int base) {return rawToNominal(val, base);}
 #endif
 
-static uint64_t getTimeInSecsSinceEpoch(void)
+uint64_t getTimeInSecsSinceEpoch(void)
 {
     struct timespec timeSpec = {0, 0};
     clock_gettime(CLOCK_REALTIME, &timeSpec);
@@ -2233,7 +2241,7 @@ STATIC CFMutableDictionaryRef copyBatteryHealthData(void)
      * If auth is not set, populate bhData with serviceFlags, keys showing no auth condition and bail early
      * This in effect, disallows "read" access to the persistent storage if the battery is non-genuine or, if the auth process hasn't completed yet.
      */
-    batteryAuthState authState = getBatteryAuthState();
+    batteryAuthState authState = MGIsiPhone() ? getBatteryAuthState() : kBatteryAuthStateNotSupported;
     switch (authState) {
         case kBatteryAuthStateTrusted:
         // treat auth not supported and trusted as same, retaining legacy behavior on non-auth devices
@@ -2263,7 +2271,6 @@ STATIC CFMutableDictionaryRef copyBatteryHealthData(void)
         NSMutableDictionary *authBhDataNs = (__bridge NSMutableDictionary *) authBhData;
         authBhDataNs[@kIOPSBatteryHealthServiceFlagsKey] = @(oldSvcFlags);
         authBhDataNs[@kIOPSBatteryHealthServiceStateKey] = @(oldSvcState);
-        authBhDataNs[@kIOPSBatteryHealthMaxCapacityPercent] = @(-1);
         return authBhData;
     }
 
@@ -2513,6 +2520,11 @@ static bool calib0RelevantDevice(void)
     return relevant;
 }
 
+static bool calibNccTHSOCRelevantDevice(CFDictionaryRef batteryProps)
+{
+    return false;
+}
+
 static int readBatteryLifetimeUPOCount(void)
 {
     NSDictionary * data;
@@ -2574,7 +2586,7 @@ static void updateCalibration0State(CFDictionaryRef batteryProps, CFMutableDicti
  * On iOS, calibration and ncc correction, both have the same scope and end of life.
  */
 
-static void initializeCalibration0(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData,
+static void initializeCalibrationData(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData,
                             IOPSBatteryHealthServiceFlags *svcFlags)
 {
     _internal_dispatch_assert_queue(batteryTimeRemainingQ);
@@ -2689,7 +2701,14 @@ static void initializeCalibration0(CFDictionaryRef batteryProps, CFMutableDictio
     }
 
 
-    calibrationFlags |= kBHCalibrationFlagCalib1NotNeeded;
+    /**
+     * move initialization of kBHCalibrationFlagCalib1NotNeeded to `initializeCalibrationCalib0` routine
+     * For WatchOS, move initialization of kBHCalibrationFlagCalib1NotNeeded to `initializeCalibrationCalib0` routine. Keep the case of IOS narrow as in kBHCalibrationFlagCalib1NotNeeded above.
+     * For iOS, calib1 is not needed if:
+     * 1) it is a new battery
+     * 2) calibration0 is happening for the first time itself in follow on releases. In the release when calib0 was rolled out, there was a latent bug which caused odd NCCP values while in calib0
+     *      That fix was only warranted on the devices that have seen calib0 already in their lifetime.
+     */
     calibrationData[@kBHCalibrationFlagsKey] = @(calibrationFlags);
     INFO_LOG("calib0: baseline calibration flags 0x%lx", calibrationFlags);
     
@@ -2705,6 +2724,19 @@ static void initializeCalibration0(CFDictionaryRef batteryProps, CFMutableDictio
 /**
  * @brief Utility function to check if calibration data exists.
  */
+
+__attribute__((unused)) static bool isCalibrationNccTHSOCRunning(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    return false;
+}
+__attribute__((unused)) static void initializeCalibrationNccTHSOC(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    return;
+}
+__attribute__((unused)) static void initializeCalibrationCalib0(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    return;
+}
 
 static bool isCalibration0Running(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData,
                     IOPSBatteryHealthServiceFlags *svcFlags)
@@ -2746,13 +2778,15 @@ TARGET_OS_XR_UNUSED static void checkCalibrationStatus(CFDictionaryRef batteryPr
 {
     _internal_dispatch_assert_queue(batteryTimeRemainingQ);
     bool anyCalibrationRunning = false;
-    bool isRelevantDevice = calib0RelevantDevice();
-    if (!isRelevantDevice) {
-        INFO_LOG("calib0: device not relevant");
+    bool calib0Needed = calib0RelevantDevice();
+    bool nccThsocCalibNeeded = calibNccTHSOCRelevantDevice(batteryProps);
+
+    if (!calib0Needed && !nccThsocCalibNeeded) {
+        INFO_LOG("calib: device not relevant");
         // On irrelevant devices, we'll never report the calibration is running.
         return;
     }
-    
+
 }
 
 
@@ -2766,12 +2800,56 @@ static void unstickCalibration1Data(CFMutableDictionaryRef bhData)
     return;
 }
 
+static int checkWeightedRaTrusted(NSDictionary *trustedBatteryHealth, NSDictionary *bhDict, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    int weightedRa = -1;
+    if (bhDict[@kIOPSTrustedLifetimeMaxWRdc]) {
+        weightedRa = [bhDict[@kIOPSTrustedLifetimeMaxWRdc] intValue];
+    }
+
+    if (trustedBatteryHealth[@kIOPSTrustedLifetimeMaxWRdc]) {
+        if ([trustedBatteryHealth[@kIOPSTrustedLifetimeMaxWRdc] intValue] > weightedRa) {
+            weightedRa = [trustedBatteryHealth[@kIOPSTrustedLifetimeMaxWRdc] intValue];
+            DEBUG_LOG("Using updated (lifetime) wra %d from trusted battery data\n", weightedRa);  
+        }
+    } else {
+        ERROR_LOG("missing trusted lifetime wra\n");
+    }
+    return weightedRa;
+}
+
+static int checkCycleCountTrusted(NSDictionary *trustedBatteryHealth, NSDictionary *bhDict, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    int cycleCount = -1;
+
+    if (bhDict[@kIOPMPSCycleCountKey]) {
+        cycleCount = [bhDict[@kIOPMPSCycleCountKey] intValue];
+    }
+
+    if (trustedBatteryHealth[@kIOPSTrustedCycleCount]) {
+        if ([trustedBatteryHealth[@kIOPSTrustedCycleCount] intValue] > cycleCount) {
+            cycleCount = [trustedBatteryHealth[@kIOPSTrustedCycleCount] intValue];
+        }
+    } else {
+        ERROR_LOG("missing trusted cycle count\n");
+    }
+
+    /**
+     * TODO: Really need a new service flag here, however we have reached end of limit on the 32b svcFlags
+     * Until then, keep following the legacy behavior on flagging this as NCCNotDet
+     */
+    if (cycleCount == -1) {
+        *svcFlags |= kBHSvcFlagNCCNotDet;
+        ERROR_LOG("Inconclusive cycleCount, svcFlags: 0x%x\n", *svcFlags);
+    }
+    return cycleCount;
+}
+
 static int checkNominalCapacityTrusted(NSDictionary *trustedBatteryHealth, NSDictionary *bhDict, IOPSBatteryHealthServiceFlags *svcFlags)
 {
     int maximumCapacity = -1;
     if (bhDict[@kIOPSBatteryHealthMaxCapacityPercent]) {
         maximumCapacity = [bhDict[@kIOPSBatteryHealthMaxCapacityPercent] intValue];
-        INFO_LOG("uninitialized maximum capacity in storage, init to (%d)", maximumCapacity);
     }
 
     if (trustedBatteryHealth[@kIOPSTrustedMaximumCapacity]) {
@@ -2781,10 +2859,16 @@ static int checkNominalCapacityTrusted(NSDictionary *trustedBatteryHealth, NSDic
             ERROR_LOG("monotonicity interrupted saved (%d) incoming (%d)\n", maximumCapacity, [trustedBatteryHealth[@kIOPSTrustedMaximumCapacity] intValue]);
         }
     } else {
-        //error condition, should never happen!
+        /**
+         * error condition, should never happen! leave the maxCapacity as is, a -1 will trigger a service condition, else will stay at
+         * its previous value
+         */
         ERROR_LOG("missing trusted maximumCapacity\n");
-        *svcFlags |= kBHSvcFlagNCCNotDet;
+    }
 
+    if (maximumCapacity == -1) {
+       *svcFlags |= kBHSvcFlagNCCNotDet;
+       ERROR_LOG("Inconclusive maximumCapacity, svcFlags: 0x%x\n", *svcFlags);
     }
     return maximumCapacity;
 }
@@ -2844,6 +2928,30 @@ static bool isSupportedCapacityMonitoring(void)
     return batteryCapacityMonitor_isCapacityQmaxAware();
 }
 
+TARGET_OS_XR_UNUSED static int getNominalChargeCapacityPercent(NSDictionary *batteryProps, IOPSBatteryHealthServiceFlags *svcFlags)
+{
+    int ncc = 0;
+    int designCap = 0;
+
+    ncc = [batteryProps[@kAsbNominalChargeCapacityKey] intValue];
+    designCap = [batteryProps[@kIOPMPSDesignCapacityKey] intValue];
+
+    if (ncc == 0 || designCap == 0) {
+        ERROR_LOG("Invalid inputs. ncc: %d designCap: %d\n", ncc, designCap);
+        *svcFlags |= kBHSvcFlagNCCNotDet;
+        return 0;
+    }
+
+    int nccp = rawToNominal(ncc, designCap);
+    if (!IS_IN_NOMINAL_RANGE(nccp)) {
+        ERROR_LOG("Failed to calculate Nominal Capacity percentage. NominalCapacity:%d DesignCapacity:%d\n",
+                ncc, designCap);
+        *svcFlags |= kBHSvcFlagNCCNotDet;
+    }
+
+    return nccp;
+}
+
 void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef bhData,
         IOPSBatteryHealthServiceFlags *svcFlags)
 {
@@ -2858,7 +2966,7 @@ void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef b
     if (bhData == NULL) {
         *svcFlags |= kBHSvcFlagNCCNotDet;
     }
-    
+
     bool currentlyCalibrating = (*svcFlags & kBHSvcFlagCurrentlyCalibrating);
     if (currentlyCalibrating) {
         unstickCalibration0Data(bhData);
@@ -2873,25 +2981,33 @@ void checkNominalCapacity(CFDictionaryRef batteryProps, CFMutableDictionaryRef b
         }
     }
 
+    NSDictionary *nsProps = (__bridge NSDictionary *) batteryProps;
     NSMutableDictionary *bhDict = (__bridge NSMutableDictionary *) bhData;
     IOPSBatteryHealthServiceFlags prevSvcFlags = [bhDict[@kIOPSBatteryHealthServiceFlagsKey] intValue];
     if (isSupportedCapacityMonitoring()) {
-        batteryCapactiyMonitorUpdate((__bridge NSDictionary *) batteryProps, bhDict, svcFlags, &prevSvcFlags);
+        batteryCapactiyMonitorUpdate(nsProps, bhDict, svcFlags, &prevSvcFlags);
     }
 
     NSDictionary *trustedBatteryHealth = batteryTrustedDataGetTrustedData();
     if (MGIsiPhone() && trustedBatteryHealth != NULL && trustedBatteryHealth[@kIOPSTrustedDataEnabled] && [trustedBatteryHealth[@kIOPSTrustedDataEnabled] intValue] != 0 && bhDict != NULL) {
         nccp = checkNominalCapacityTrusted(trustedBatteryHealth, bhDict, svcFlags);
+        int cycleCountTrusted = checkCycleCountTrusted(trustedBatteryHealth, bhDict, svcFlags);
+        bhDict[@kIOPMPSCycleCountKey] = @(cycleCountTrusted);
+        // skip everything else if trusted path is available
         goto out;
     }
 
-    CFDictionaryGetIntValue(batteryProps, CFSTR("NominalChargeCapacity"), ncc);
-    CFDictionaryGetIntValue(batteryProps, CFSTR(kIOPMPSDesignCapacityKey), designCap);
+    ncc = [nsProps[@kAsbNominalChargeCapacityKey] intValue];
+    designCap = [nsProps[@kIOPMPSDesignCapacityKey] intValue];
+    if (ncc <= 0 || designCap <= 0) {
+        ERROR_LOG("Invalid inputs ncc: %d design capacity: %d", ncc, designCap);
+        *svcFlags |= kBHSvcFlagNCCNotDet;
+        return;
+    }
 
     nccp = rawToNominal(ncc, designCap);
     if (!IS_IN_NOMINAL_RANGE(nccp)) {
-        ERROR_LOG("Failed to calculate Nominal Capacity percentage. NominalCapacity:%d DesignCapacity:%d\n",
-                ncc, designCap);
+        ERROR_LOG("Invalid nccp: %d", nccp);
         *svcFlags |= kBHSvcFlagNCCNotDet;
         return;
     }
@@ -3047,7 +3163,7 @@ TARGET_OS_XR_UNUSED STATIC void checkUPOCount(IOPSBatteryHealthServiceFlags *svc
     }
 }
 
-TARGET_OS_XR_UNUSED STATIC void checkWeightedRa(CFDictionaryRef batteryProps, IOPSBatteryHealthServiceFlags *svcFlags)
+TARGET_OS_XR_UNUSED STATIC void checkWeightedRa(CFDictionaryRef batteryProps, NSMutableDictionary *bhDict, IOPSBatteryHealthServiceFlags *svcFlags)
 {
     CFDictionaryRef batteryData = NULL;
     static int weightedRa = -1;
@@ -3073,24 +3189,21 @@ TARGET_OS_XR_UNUSED STATIC void checkWeightedRa(CFDictionaryRef batteryProps, IO
         return;
     }
 
-    // read/update wRa value from provider 
-    if ((weightedRa <= 0) || (timeDelta >= battReadTimeDelta)) {
-        NSDictionary *trustedBatteryHealth = batteryTrustedDataGetTrustedData();
-        if (MGIsiPhone() && trustedBatteryHealth != NULL && trustedBatteryHealth[@kIOPSTrustedDataEnabled] && [trustedBatteryHealth[@kIOPSTrustedDataEnabled] intValue] != 0) {
-            weightedRa = [trustedBatteryHealth[@kIOPSTrustedLifetimeMaxWRdc] intValue];
-            DEBUG_LOG("Using updated wRA %d from trusted battery data after %llu secs\n", weightedRa, timeDelta);
-        } else {
-            weightedRa = -1; // Reset to -1 to avoid re-using previous value
-            batteryData = CFDictionaryGetValue(batteryProps, CFSTR("BatteryData"));
-            NSNumber *wRa = getWeightedRa((__bridge NSDictionary *)batteryData);
-            if (wRa) {
-                weightedRa = [wRa intValue];
-            }
-            DEBUG_LOG("Using updated wRA %d from battery properties after %llu secs\n", weightedRa, timeDelta);
+    // read/update wRa value from provider
+    NSDictionary *trustedBatteryHealth = batteryTrustedDataGetTrustedData();
+    if (MGIsiPhone() && trustedBatteryHealth != NULL && trustedBatteryHealth[@kIOPSTrustedDataEnabled] && [trustedBatteryHealth[@kIOPSTrustedDataEnabled] intValue] != 0) {
+        weightedRa = checkWeightedRaTrusted(trustedBatteryHealth, bhDict, svcFlags);
+        bhDict[@kIOPSTrustedLifetimeMaxWRdc] = @(weightedRa);
+    } else if ((weightedRa <= 0) || (timeDelta >= battReadTimeDelta)) {
+        weightedRa = -1; // Reset to -1 to avoid re-using previous value
+        batteryData = CFDictionaryGetValue(batteryProps, CFSTR("BatteryData"));
+        NSNumber *wRa = getWeightedRa((__bridge NSDictionary *)batteryData);
+        if (wRa) {
+            weightedRa = [wRa intValue];
         }
+        DEBUG_LOG("Using updated wRA %d from battery properties after %llu secs\n", weightedRa, timeDelta);
         wraUpdate_ts = currentTime;
-    }
-    else {
+    } else {
         DEBUG_LOG("Using previous wRA %d\n", weightedRa);
     }
 
@@ -3165,9 +3278,10 @@ STATIC void _setBatteryHealthData(
     NSDictionary *bhDict = (__bridge NSDictionary *) bhData;
     if ([bhDict[@kIOPSBatteryHealthServiceFlagsKey] intValue] & (kBHSvcFlagAuthNotDet | kBHSvcFlagAuthFailure)) {
         NSMutableDictionary *outDataNs = (__bridge NSMutableDictionary *) outDict;
+        int nccp = getNominalChargeCapacityPercent((__bridge NSMutableDictionary *)batteryProps, &svcFlags);
         outDataNs[@kIOPSBatteryHealthServiceStateKey] = bhDict[@kIOPSBatteryHealthServiceStateKey];
-        outDataNs[@kIOPSBatteryHealthServiceFlagsKey] = bhDict[@kIOPSBatteryHealthServiceFlagsKey];
-        outDataNs[@kIOPSBatteryHealthMaxCapacityPercent] = bhDict[@kIOPSBatteryHealthMaxCapacityPercent];
+        outDataNs[@kIOPSBatteryHealthServiceFlagsKey] = @([bhDict[@kIOPSBatteryHealthServiceFlagsKey] intValue] | svcFlags);
+        outDataNs[@kIOPSBatteryHealthMaxCapacityPercent] = @(nccp);
         DEBUG_LOG("Skipping battery health loop due to missing auth [0x%x]", svcFlags);
         CFRelease(bhData);
         return;
@@ -3188,11 +3302,13 @@ STATIC void _setBatteryHealthData(
         CFDictionaryRemoveValue(bhData, CFSTR(kIOPMPSCycleCountKey));
         CFDictionaryRemoveValue(bhData, CFSTR(kIOPSBatteryHealthServiceStateKey));
         CFDictionaryRemoveValue(bhData, CFSTR(kBHCalibration0Key));
+        CFDictionaryRemoveValue(bhData, CFSTR(kIOPSTrustedLifetimeMaxWRdc));
 
         removeKeyFromBatteryHealthDataPrefs(CFSTR(kIOPSBatteryHealthMaxCapacityPercent));
         removeKeyFromBatteryHealthDataPrefs(CFSTR(kIOPMPSCycleCountKey));
         removeKeyFromBatteryHealthDataPrefs(CFSTR(kIOPSBatteryHealthServiceStateKey));
         removeKeyFromBatteryHealthDataPrefs(CFSTR(kBHCalibration0Key));
+        removeKeyFromBatteryHealthDataPrefs(CFSTR(kIOPSTrustedLifetimeMaxWRdc));
 
         if (battPropsSerial == NULL) {
             CFDictionaryRemoveValue(bhData, CFSTR(kIOPSBatterySerialNumberKey));
@@ -3237,10 +3353,11 @@ STATIC void _setBatteryHealthData(
     INFO_LOG("calib: svcFlags post: 0x%x", svcFlags);
     checkNominalCapacity(batteryProps, bhData, &svcFlags);
     checkUPOCount(&svcFlags);
-    checkWeightedRa(batteryProps, &svcFlags);
+    checkWeightedRa(batteryProps, (__bridge NSMutableDictionary *)bhData, &svcFlags);
     checkCellDisconnectCount(batteryProps, &svcFlags);
 
     updateBatteryServiceState(batteryProps, bhData, svcFlags);
+
     saveBatteryHealthDataToPrefs(bhData);
 
 
