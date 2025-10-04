@@ -22,7 +22,7 @@
  */
 
 
-#include <CoreFoundation/CoreFoundation.h>
+#import <Foundation/Foundation.h>
 #include <CoreFoundation/CFXPCBridge.h>
 #include <IOKit/IOHibernatePrivate.h>
 #include <IOKit/hidsystem/IOHIDLib.h>
@@ -63,12 +63,7 @@
 #include "PMAssertions.h"
 #include "adaptiveDisplay.h"
 
-#include <System/sys/kdebug.h>
-#ifndef POWERDBG_CODE
-#define POWERDBG_CODE(code) DAEMONDBG_CODE(DBG_DAEMON_POWERD, code)
-#endif
-
-#define POWERD_CLWK_CODE 0x1
+#include "PowerManagementSignposts.h"
 
 #define kIntegerStringLen               15
 extern os_log_t    sleepwake_log;
@@ -300,6 +295,66 @@ __private_extern__ void incrementSleepCnt(void)
     sleepCntSinceFailure++;
 }
 
+@interface SecTaskWrap : NSObject {
+    SecTaskRef _secTask;
+}
+- (id)initWithSecTaskRef:(nonnull SecTaskRef) task;
+@end
+
+@implementation SecTaskWrap
+- (id)initWithSecTaskRef:(nonnull SecTaskRef) task
+{
+    self = [self init];
+    if (!self) {
+        return nil;
+    }
+
+    CFRetain(task);
+    _secTask = task;
+
+    return self;
+}
+
+- (void)dealloc
+{
+    CFRelease(_secTask);
+}
+
+- (SecTaskRef)secTask
+{
+    CFRetain(_secTask);
+    return _secTask;
+}
+@end
+
+static SecTaskRef copySecTaskForAuditToken(audit_token_t token)
+{
+    static NSCache *entitlementCache = nil;
+    static dispatch_once_t onceToken;
+
+    dispatch_once(&onceToken, ^{
+        entitlementCache = [[NSCache alloc] init];
+
+        // Limit max entries in the cache to control memory footprint
+        entitlementCache.countLimit = 50;
+    });
+
+    NSData *tokenObj = [NSData dataWithBytes:&token length:sizeof(token)];
+    SecTaskWrap *secTaskObj = [entitlementCache objectForKey:tokenObj];
+    if (!secTaskObj) {
+        SecTaskRef secTask = SecTaskCreateWithAuditToken(kCFAllocatorDefault, token);
+        if (!secTask) {
+            return nil;
+        }
+
+        secTaskObj = [[SecTaskWrap alloc] initWithSecTaskRef:secTask];
+        CFRelease(secTask);
+        [entitlementCache setObject:secTaskObj forKey:tokenObj];
+    }
+
+    return secTaskObj.secTask;
+}
+
 __private_extern__ bool auditTokenHasEntitlement(
                                      audit_token_t token,
                                      CFStringRef entitlement)
@@ -308,12 +363,12 @@ __private_extern__ bool auditTokenHasEntitlement(
     CFTypeRef val = NULL;
     bool caller_is_allowed = false;
     CFErrorRef      errorp = NULL;
-    
-    task = SecTaskCreateWithAuditToken(kCFAllocatorDefault, token);
+
+    task = copySecTaskForAuditToken(token);
     if (task) {
         val = SecTaskCopyValueForEntitlement(task, entitlement, &errorp);
         CFRelease(task);
-        
+
         if (kCFBooleanTrue == val) {
             caller_is_allowed = true;
         }
@@ -326,28 +381,13 @@ __private_extern__ bool auditTokenHasEntitlement(
         }
     }
     return caller_is_allowed;
-    
 }
 
 __private_extern__ bool xpcConnectionHasEntitlement(xpc_object_t connection, CFStringRef entitlement)
 {
-    SecTaskRef secTask = NULL;
-    audit_token_t token;
     pid_t   pid;
-    xpc_connection_get_audit_token(connection, &token);
     pid = xpc_connection_get_pid(connection);
-    bool is_allowed = false;
-    secTask = SecTaskCreateWithAuditToken(kCFAllocatorDefault, token);
-    if (secTask) {
-        CFTypeRef val = SecTaskCopyValueForEntitlement(secTask, entitlement, NULL);
-        if (kCFBooleanTrue == val) {
-            is_allowed = true;
-        }
-        if (val) {
-            CFRelease(val);
-        }
-        CFRelease(secTask);
-    }
+    bool is_allowed = isSenderEntitled(connection, entitlement, false);
     if (!is_allowed) {
         ERROR_LOG("PID %d doesnt have entitlement %@\n", pid, entitlement);
     }
@@ -361,7 +401,7 @@ __private_extern__ bool auditTokenIsRunningboardd(audit_token_t token)
     bool caller_is_runningboardd = false;
     CFErrorRef      errorp = NULL;
 
-    task = SecTaskCreateWithAuditToken(kCFAllocatorDefault, token);
+    task = copySecTaskForAuditToken(token);
     if (task) {
         val = SecTaskCopyValueForEntitlement(task, CFSTR("com.apple.private.xpc.launchd.job-manager"), &errorp);
         CFRelease(task);
@@ -630,7 +670,7 @@ __private_extern__ void appClaimWakeReason(xpc_connection_t peer, xpc_object_t c
     }
     xpc_connection_get_audit_token(peer, &token);
     pid = xpc_connection_get_pid(peer);
-    secTask = SecTaskCreateWithAuditToken(kCFAllocatorDefault, token);
+    secTask = copySecTaskForAuditToken(token);
     if (secTask) {
         entitled_DarkWakeControl = SecTaskCopyValueForEntitlement(secTask, kIOPMDarkWakeControlEntitlement, NULL);
     }
@@ -835,7 +875,7 @@ bool isSenderEntitled(xpc_object_t remoteConnection, CFStringRef entitlementStri
         goto exit;
     }
     xpc_connection_get_audit_token(remoteConnection, &token);
-    secTask = SecTaskCreateWithAuditToken(kCFAllocatorDefault, token);
+    secTask = copySecTaskForAuditToken(token);
     if (secTask) {
         entitlement = SecTaskCopyValueForEntitlement(secTask, entitlementString, NULL);
     }
@@ -881,7 +921,6 @@ __private_extern__ void resetCustomBatteryProps(xpc_object_t remoteConnection, x
     }
 exit:
     xpc_connection_send_message(remoteConnection, respMsg);
-    xpc_release(respMsg);
 }
 
 __private_extern__ void setCustomBatteryProps(xpc_object_t remoteConnection, xpc_object_t msg)
@@ -924,7 +963,6 @@ exit:
     if (batteryProps) {
         CFRelease(batteryProps);
     }
-    xpc_release(respMsg);
 }
 
 
@@ -2049,9 +2087,7 @@ void initializeMT2Aggregator(void)
     if (mt2)
     {
         /* Zero out & recycle MT2Aggregator structure */
-        if (mt2->nextFireSource) {
-            dispatch_release(mt2->nextFireSource);
-        }
+        mt2->nextFireSource = nil;
         CFRelease(mt2->alreadyRecordedBackground);
         CFRelease(mt2->tookBackground);
         CFRelease(mt2->alreadyRecordedPush);
@@ -2062,7 +2098,7 @@ void initializeMT2Aggregator(void)
         CFRelease(mt2->demandSleepAppTimeouts);
         CFRelease(mt2->darkwakeSleepAppTimeouts);
 
-        bzero(mt2, sizeof(MT2Aggregator));
+        bzero((void *)mt2, sizeof(MT2Aggregator));
     } else {
         /* New datastructure */
         mt2 = calloc(1, sizeof(MT2Aggregator));
@@ -3182,9 +3218,19 @@ pluginExecCommand(const char *path, char *const argv[],
             waitpid(pid, &status, 0);
             callback(pid, status);
             dispatch_source_cancel(src);
-            dispatch_release(src);
         });
         dispatch_activate(src);
     }
     return 0;
+}
+
+void powerd_notify_and_log(os_log_t log, const char *token)
+{
+    uint32_t rc = notify_post(token);
+
+    if (rc == NOTIFY_STATUS_OK) {
+        os_log(log, "posted '%s'\n", token);
+    } else {
+        os_log_error(log, "failed to post '%s'. rc:%#x\n", token, rc);
+    }
 }
